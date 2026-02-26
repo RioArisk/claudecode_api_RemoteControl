@@ -185,7 +185,47 @@ wss.on('connection', (ws) => {
 });
 
 // ============================================================
-//  3. PTY Manager — local terminal passthrough
+//  3. PTY Mode Detection (ANSI side-channel parsing)
+// ============================================================
+let ptyTextBuf = '';
+
+function stripAnsi(s) {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1B(?:\[[0-9;]*[A-Za-z]|\].*?(?:\x07|\x1B\\)|\([B0])/g, '');
+}
+
+function detectModeFromPTY(data) {
+  // Accumulate and debounce — Claude Code redraws the full screen
+  ptyTextBuf += data;
+  if (ptyTextBuf.length > 8000) ptyTextBuf = ptyTextBuf.slice(-4000);
+
+  const plain = stripAnsi(ptyTextBuf);
+
+  let detected = null;
+  // Match Claude Code status bar mode indicators
+  if (/plan mode on/i.test(plain) || /\u23F8\s*plan/i.test(plain)) {
+    detected = 'plan';
+  } else if (/accept edits on/i.test(plain) || /\u23F5\u23F5\s*accept/i.test(plain)) {
+    detected = 'acceptEdits';
+  } else if (/bypass.*on/i.test(plain)) {
+    detected = 'bypassPermissions';
+  }
+  // "shift+tab to cycle" without a mode prefix = default
+  if (!detected && /shift\+tab to cycle/i.test(plain)) {
+    // Only if none of the above matched
+    detected = 'default';
+  }
+
+  if (detected && detected !== currentMode) {
+    currentMode = detected;
+    broadcast({ type: 'mode', mode: currentMode });
+    log(`Mode detected from PTY: ${currentMode}`);
+    ptyTextBuf = '';  // reset after detection
+  }
+}
+
+// ============================================================
+//  4. PTY Manager — local terminal passthrough
 // ============================================================
 function spawnClaude() {
   snapshotExistingFiles();
@@ -211,10 +251,11 @@ function spawnClaude() {
   log(`Claude spawned (pid ${claudeProc.pid}) — ${cols}x${rows}`);
   broadcast({ type: 'status', status: 'running', pid: claudeProc.pid });
 
-  // === PTY output → local terminal + WebSocket ===
+  // === PTY output → local terminal + WebSocket + mode detection ===
   claudeProc.onData((data) => {
     if (isTTY) process.stdout.write(data);   // show in the terminal you ran the bridge from
     broadcast({ type: 'pty_output', data });  // push to WebUI
+    detectModeFromPTY(data);
   });
 
   // === Local terminal input → PTY ===
