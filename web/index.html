@@ -272,6 +272,7 @@ header {
 #input-area {
   flex-shrink: 0; padding: 10px 16px 12px;
   background: var(--bg); border-top: 1px solid var(--border);
+  position: relative;
 }
 #input-row {
   max-width: 720px; margin: 0 auto;
@@ -456,6 +457,59 @@ header {
 }
 .perm-btn-allow:hover { background: #247a5e; }
 
+/* ===== Slash Command Menu ===== */
+#cmd-menu {
+  display: none; position: absolute; bottom: 100%; left: 0; right: 0;
+  background: var(--bg-white); border: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  box-shadow: 0 -4px 16px rgba(0,0,0,.08);
+  max-height: 260px; overflow-y: auto; z-index: 20;
+}
+#cmd-menu.visible { display: block; }
+.cmd-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; cursor: pointer; transition: background .1s;
+}
+.cmd-item:hover, .cmd-item.active { background: var(--bg-hover); }
+.cmd-icon {
+  width: 28px; height: 28px; border-radius: 6px;
+  background: var(--accent-light); color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; font-size: 13px;
+}
+.cmd-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.cmd-desc { font-size: 12px; color: var(--text-muted); }
+
+/* ===== Model Picker Overlay ===== */
+#model-picker {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.35);
+  align-items: flex-end; justify-content: center;
+}
+#model-picker.visible { display: flex; }
+#model-dialog {
+  width: 100%; max-width: 400px;
+  background: var(--bg-white); border-radius: 16px 16px 0 0;
+  padding: 16px 0 20px; box-shadow: 0 -4px 24px rgba(0,0,0,.12);
+  animation: slideUp .2s ease;
+}
+.model-title {
+  padding: 0 20px 12px; font-size: 15px; font-weight: 600;
+  color: var(--text); border-bottom: 1px solid var(--border);
+}
+.model-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 20px; cursor: pointer; transition: background .1s;
+}
+.model-item:hover { background: var(--bg-hover); }
+.model-item .mi-num {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: var(--bg); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600; color: var(--text-muted); flex-shrink: 0;
+}
+.model-item .mi-name { font-size: 14px; color: var(--text); }
+
 @media (max-width: 600px) {
   #messages { padding: 12px 16px; }
   .step-desc { max-width: 120px; }
@@ -495,6 +549,7 @@ header {
   </div>
 
   <div id="input-area">
+    <div id="cmd-menu"></div>
     <div id="input-row">
       <div class="input-pill">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
@@ -506,6 +561,13 @@ header {
       <button id="btn-scroll" title="Scroll to bottom">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
       </button>
+    </div>
+  </div>
+
+  <div id="model-picker">
+    <div id="model-dialog">
+      <div class="model-title">Switch Model</div>
+      <div id="model-list"></div>
     </div>
   </div>
 
@@ -751,10 +813,51 @@ function ensureGroup() {
 // ============================================================
 //  Event Processing
 // ============================================================
+const JUNK_PATTERNS = [
+  /^Caveat:/i,
+  /^<local-command/,
+  /^<command-name>/,
+  /^<command-message>/,
+  /^<command-args>/,
+  /^<local-command-stdout>/,
+  /^<\/local-command/,
+];
+
+function isJunkContent(content) {
+  if (typeof content !== 'string') return false;
+  const t = content.trim();
+  // Filter slash command echo (e.g. "/model", "/cost")
+  if (/^\/[a-z]+$/i.test(t)) return true;
+  // Filter model switch response
+  if (/^Set model to/i.test(t) || /Set model to/i.test(t.replace(/\x1B\[[0-9;]*m/g, ''))) return true;
+  // Filter system injection messages
+  return JUNK_PATTERNS.some(p => p.test(t));
+}
+
 function processEvent(evt) {
   if (S.seenUuids.has(evt.uuid)) return;
   if (evt.uuid) S.seenUuids.add(evt.uuid);
   removeWelcome();
+
+  // Filter slash command pollution from JSONL
+  if (evt.type === 'user' && evt.message) {
+    const c = evt.message.content;
+    if (typeof c === 'string' && isJunkContent(c)) return;
+  }
+  if (evt.type === 'assistant' && evt.message) {
+    const blocks = evt.message.content;
+    if (Array.isArray(blocks) && blocks.length === 1 && blocks[0].type === 'text') {
+      const txt = blocks[0].text;
+      // Extract model from "Set model to xxx (claude-xxx)" response
+      const modelMatch = txt.match(/Set model to.*?\(([^)]+)\)/i) ||
+                          txt.replace(/\x1B\[[0-9;]*m/g, '').match(/Set model to.*?\(([^)]+)\)/i);
+      if (modelMatch) {
+        S.model = modelMatch[1];
+        updateHeaderInfo();
+      }
+      if (isJunkContent(txt)) return;
+    }
+  }
 
   if (evt.type === 'user' && evt.message) renderUser(evt);
   else if (evt.type === 'assistant' && evt.message) {
@@ -937,14 +1040,143 @@ $('btn-close-terminal').addEventListener('click', () => {
 });
 
 // ============================================================
+//  Slash Commands
+// ============================================================
+const COMMANDS = [
+  { name: '/model', desc: 'Switch model', icon: '⚙' },
+  { name: '/cost', desc: 'Show token costs', icon: '$' },
+  { name: '/compact', desc: 'Compact context', icon: '⊞' },
+  { name: '/clear', desc: 'Clear conversation', icon: '✕' },
+  { name: '/help', desc: 'Show help', icon: '?' },
+];
+
+const MODELS = [
+  { num: '1', id: 'opus', label: 'Claude Opus 4.6' },
+  { num: '2', id: 'sonnet', label: 'Claude Sonnet 4.6' },
+  { num: '3', id: 'haiku', label: 'Claude Haiku 4.5' },
+];
+
+let cmdMenuOpen = false;
+let cmdActiveIdx = -1;
+
+function showCmdMenu(filter) {
+  const menu = $('cmd-menu');
+  const items = COMMANDS.filter(c => c.name.includes(filter.toLowerCase()));
+  if (items.length === 0) { hideCmdMenu(); return; }
+
+  menu.innerHTML = items.map((c, i) =>
+    `<div class="cmd-item${i === 0 ? ' active' : ''}" data-cmd="${c.name}">
+      <div class="cmd-icon">${c.icon}</div>
+      <div><div class="cmd-name">${c.name}</div><div class="cmd-desc">${c.desc}</div></div>
+    </div>`
+  ).join('');
+
+  menu.querySelectorAll('.cmd-item').forEach(el => {
+    el.addEventListener('click', () => execCmd(el.dataset.cmd));
+  });
+
+  cmdActiveIdx = 0;
+  cmdMenuOpen = true;
+  menu.classList.add('visible');
+}
+
+function hideCmdMenu() {
+  $('cmd-menu').classList.remove('visible');
+  cmdMenuOpen = false;
+  cmdActiveIdx = -1;
+}
+
+function execCmd(cmd) {
+  hideCmdMenu();
+  $input.value = '';
+  $input.style.height = 'auto';
+  updateSendBtn();
+
+  if (cmd === '/model') {
+    showModelPicker();
+    return;
+  }
+
+  // Other commands: send directly through PTY
+  sendSlashCmd(cmd);
+}
+
+function sendSlashCmd(text) {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  S.ws.send(JSON.stringify({ type: 'chat', text }));
+}
+
+function showModelPicker() {
+  const list = $('model-list');
+  list.innerHTML = MODELS.map(m =>
+    `<div class="model-item" data-num="${m.num}">
+      <span class="mi-num">${m.num}</span>
+      <span class="mi-name">${m.label}</span>
+    </div>`
+  ).join('');
+
+  list.querySelectorAll('.model-item').forEach(el => {
+    el.addEventListener('click', () => {
+      hideModelPicker();
+      // Send /model then the number
+      sendSlashCmd('/model');
+      setTimeout(() => {
+        if (S.ws?.readyState === WebSocket.OPEN) {
+          S.ws.send(JSON.stringify({ type: 'chat', text: el.dataset.num }));
+        }
+      }, 500);
+    });
+  });
+
+  $('model-picker').classList.add('visible');
+}
+
+function hideModelPicker() {
+  $('model-picker').classList.remove('visible');
+}
+$('model-picker').addEventListener('click', e => {
+  if (e.target === $('model-picker')) hideModelPicker();
+});
+
+// ============================================================
 //  Input
 // ============================================================
 $input.addEventListener('input', () => {
   $input.style.height = 'auto';
   $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
   updateSendBtn();
+
+  // Slash command detection
+  const val = $input.value;
+  if (val.startsWith('/') && !val.includes(' ') && val.length > 0) {
+    showCmdMenu(val);
+  } else {
+    hideCmdMenu();
+  }
 });
 $input.addEventListener('keydown', e => {
+  if (cmdMenuOpen) {
+    const items = $('cmd-menu').querySelectorAll('.cmd-item');
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[cmdActiveIdx]?.classList.remove('active');
+      if (e.key === 'ArrowDown') cmdActiveIdx = Math.min(cmdActiveIdx + 1, items.length - 1);
+      else cmdActiveIdx = Math.max(cmdActiveIdx - 1, 0);
+      items[cmdActiveIdx]?.classList.add('active');
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const active = items[cmdActiveIdx];
+      if (active) execCmd(active.dataset.cmd);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideCmdMenu();
+      return;
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 $('btn-send').addEventListener('click', send);
