@@ -392,6 +392,62 @@ header {
   margin-top: 4px; text-align: right;
 }
 
+/* ===== Permission Overlay ===== */
+#perm-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.35);
+  align-items: flex-end; justify-content: center;
+  animation: fadeIn .15s ease;
+}
+#perm-overlay.visible { display: flex; }
+@keyframes fadeIn { from{opacity:0}to{opacity:1} }
+
+#perm-dialog {
+  width: 100%; max-width: 480px;
+  background: var(--bg-white); border-radius: 16px 16px 0 0;
+  padding: 20px 20px 24px; box-shadow: 0 -4px 24px rgba(0,0,0,.12);
+  animation: slideUp .2s ease;
+}
+@keyframes slideUp { from{transform:translateY(30px);opacity:0}to{transform:translateY(0);opacity:1} }
+
+.perm-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.perm-icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: #fff3e0; color: #e8a000;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.perm-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.perm-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+.perm-detail {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 16px;
+  font-family: var(--mono); font-size: 13px; color: var(--text-secondary);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 180px; overflow-y: auto; line-height: 1.5;
+}
+
+.perm-actions {
+  display: flex; gap: 10px;
+}
+.perm-actions button {
+  flex: 1; padding: 10px; border-radius: 10px;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  border: none; transition: all .15s;
+}
+.perm-btn-deny {
+  background: var(--bg); color: var(--text-secondary);
+  border: 1px solid var(--border) !important;
+}
+.perm-btn-deny:hover { background: var(--error-bg); color: var(--error); }
+.perm-btn-allow {
+  background: var(--accent); color: #fff;
+}
+.perm-btn-allow:hover { background: #247a5e; }
+
 @media (max-width: 600px) {
   #messages { padding: 12px 16px; }
   .step-desc { max-width: 120px; }
@@ -442,6 +498,25 @@ header {
     </div>
   </div>
 
+  <div id="perm-overlay">
+    <div id="perm-dialog">
+      <div class="perm-header">
+        <div class="perm-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        </div>
+        <div>
+          <div class="perm-title" id="perm-tool-name">Bash</div>
+          <div class="perm-sub">Requesting permission</div>
+        </div>
+      </div>
+      <div class="perm-detail" id="perm-detail"></div>
+      <div class="perm-actions">
+        <button class="perm-btn-deny" id="perm-deny">Deny</button>
+        <button class="perm-btn-allow" id="perm-allow">Allow</button>
+      </div>
+    </div>
+  </div>
+
   <div id="terminal-panel" class="hidden">
     <div id="terminal-bar">
       <span>TERMINAL</span>
@@ -473,6 +548,8 @@ const S = {
   thinkingEl: null,         // current thinking indicator element
   cwd: '',                  // working directory from server
   model: '',                // model name from assistant events
+  mode: 'default',          // permission mode
+  pendingPermId: null,      // current permission request id
 };
 
 const $ = id => document.getElementById(id);
@@ -565,8 +642,11 @@ function formatModel(m) {
 function updateHeaderInfo() {
   const path = shortenPath(S.cwd);
   const model = formatModel(S.model);
+  const modeLabels = { default: '', plan: 'Plan', acceptEdits: 'Accept Edits', bypassPermissions: 'Auto', dontAsk: 'Auto' };
+  const modeStr = modeLabels[S.mode] || '';
   $('title').textContent = path || 'Claude Remote';
-  $('header-meta').textContent = model ? model : '';
+  const parts = [model, modeStr].filter(Boolean);
+  $('header-meta').textContent = parts.join(' · ');
 }
 
 // ============================================================
@@ -886,6 +966,8 @@ function connect() {
       if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
     }
     else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
+    else if (m.type === 'permission_request') showPermission(m);
+    else if (m.type === 'mode') { S.mode = m.mode; updateHeaderInfo(); }
   };
   ws.onclose = () => { setStatus('disconnected'); setConnBanner(true, true); setTimeout(connect, 2000); };
   ws.onerror = () => {};
@@ -901,6 +983,46 @@ function setConnBanner(show, reconnecting) {
   el.classList.toggle('reconnecting', !!reconnecting);
   $('conn-text').textContent = reconnecting ? 'Reconnecting...' : 'Disconnected';
 }
+
+// ============================================================
+//  Permission Dialog
+// ============================================================
+function permToolDetail(name, input) {
+  if (!input) return name;
+  switch (name) {
+    case 'Bash': return input.command || input.description || '';
+    case 'Read': return input.file_path || '';
+    case 'Write': return `Write → ${input.file_path || ''}`;
+    case 'Edit': return `Edit → ${input.file_path || ''}`;
+    case 'Glob': return `Glob: ${input.pattern || ''}`;
+    case 'Grep': return `Grep: ${input.pattern || ''}`;
+    case 'WebFetch': return input.url || '';
+    case 'WebSearch': return `Search: ${input.query || ''}`;
+    case 'Task': return input.description || '';
+    default: return JSON.stringify(input, null, 2).substring(0, 300);
+  }
+}
+
+function showPermission(m) {
+  S.pendingPermId = m.id;
+  $('perm-tool-name').textContent = m.toolName;
+  $('perm-detail').textContent = permToolDetail(m.toolName, m.toolInput);
+  $('perm-overlay').classList.add('visible');
+}
+
+function resolvePermission(decision) {
+  if (!S.pendingPermId || !S.ws) return;
+  S.ws.send(JSON.stringify({
+    type: 'permission_response',
+    id: S.pendingPermId,
+    decision,
+  }));
+  S.pendingPermId = null;
+  $('perm-overlay').classList.remove('visible');
+}
+
+$('perm-allow').addEventListener('click', () => resolvePermission('allow'));
+$('perm-deny').addEventListener('click', () => resolvePermission('deny'));
 
 connect();
 $input.focus();

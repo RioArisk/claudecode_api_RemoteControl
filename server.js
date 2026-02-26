@@ -21,6 +21,11 @@ let discoveryTimer = null;
 let preExistingFiles = new Set();
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 
+// --- Permission approval state ---
+let approvalSeq = 0;
+const pendingApprovals = new Map();  // id → { res, timer }
+let currentMode = 'default';
+
 // --- Logging → file only (never pollute the terminal) ---
 const LOG_FILE = path.join(__dirname, 'bridge.log');
 fs.writeFileSync(LOG_FILE, `--- Bridge started ${new Date().toISOString()} ---\n`);
@@ -43,6 +48,58 @@ const MIME = {
 
 const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
+
+  // --- API: Hook approval endpoint ---
+  if (req.method === 'POST' && url === '/hook/pre-tool-use') {
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', () => {
+      let data;
+      try { data = JSON.parse(body); } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'ask' }));
+        return;
+      }
+
+      // Track mode from hook payload
+      if (data.permission_mode && data.permission_mode !== currentMode) {
+        currentMode = data.permission_mode;
+        broadcast({ type: 'mode', mode: currentMode });
+      }
+
+      // No WebUI clients → fall back to terminal prompt
+      const clients = [...wss.clients].filter(c => c.readyState === WebSocket.OPEN);
+      if (clients.length === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'ask' }));
+        return;
+      }
+
+      const id = String(++approvalSeq);
+      log(`Permission #${id}: ${data.tool_name} → ${clients.length} WebUI client(s)`);
+
+      broadcast({
+        type: 'permission_request',
+        id,
+        toolName: data.tool_name,
+        toolInput: data.tool_input,
+        permissionMode: data.permission_mode,
+      });
+
+      // Hold HTTP response open until WebUI user decides or timeout
+      const timer = setTimeout(() => {
+        pendingApprovals.delete(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'ask' }));
+        log(`Permission #${id}: timeout → ask`);
+      }, 90000);
+
+      pendingApprovals.set(id, { res, timer });
+    });
+    return;
+  }
+
+  // --- Static files ---
   const filePath = path.join(__dirname, 'web', url === '/' ? 'index.html' : url);
   const ext = path.extname(filePath);
   fs.readFile(filePath, (err, data) => {
@@ -109,6 +166,20 @@ wss.on('connection', (ws) => {
           claudeProc.resize(msg.cols, msg.rows);
         }
         break;
+      case 'permission_response': {
+        const approval = pendingApprovals.get(msg.id);
+        if (approval) {
+          clearTimeout(approval.timer);
+          pendingApprovals.delete(msg.id);
+          approval.res.writeHead(200, { 'Content-Type': 'application/json' });
+          approval.res.end(JSON.stringify({
+            decision: msg.decision,
+            reason: msg.reason || '',
+          }));
+          log(`Permission #${msg.id}: ${msg.decision}`);
+        }
+        break;
+      }
     }
   });
 });
@@ -134,7 +205,7 @@ function spawnClaude() {
     cols,
     rows,
     cwd: CWD,
-    env: { ...process.env, FORCE_COLOR: '1' },
+    env: { ...process.env, FORCE_COLOR: '1', BRIDGE_PORT: String(PORT) },
   });
 
   log(`Claude spawned (pid ${claudeProc.pid}) — ${cols}x${rows}`);
@@ -275,7 +346,43 @@ function stopTailing() {
 }
 
 // ============================================================
-//  5. Startup
+//  5. Hook Auto-Setup
+// ============================================================
+function setupHooks() {
+  const claudeDir = path.join(CWD, '.claude');
+  if (!fs.existsSync(claudeDir)) fs.mkdirSync(claudeDir, { recursive: true });
+
+  const settingsPath = path.join(claudeDir, 'settings.local.json');
+  let settings = {};
+  try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+
+  const hookScript = path.resolve(__dirname, 'hooks', 'bridge-approval.js').replace(/\\/g, '/');
+  const hookCmd = `node "${hookScript}"`;
+
+  // Merge bridge hook into PreToolUse (preserve user's other hooks)
+  const existing = settings.hooks?.PreToolUse || [];
+  const bridgeIdx = existing.findIndex(e =>
+    e.hooks?.some(h => h.command?.includes('bridge-approval'))
+  );
+  const bridgeEntry = {
+    matcher: '',
+    hooks: [{ type: 'command', command: hookCmd, timeout: 120 }],
+  };
+
+  if (bridgeIdx >= 0) {
+    existing[bridgeIdx] = bridgeEntry;
+  } else {
+    existing.push(bridgeEntry);
+  }
+
+  settings.hooks = settings.hooks || {};
+  settings.hooks.PreToolUse = existing;
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  log(`Hooks configured: ${settingsPath}`);
+}
+
+// ============================================================
+//  6. Startup
 // ============================================================
 server.listen(PORT, '0.0.0.0', () => {
   const ifaces = os.networkInterfaces();
@@ -304,6 +411,7 @@ server.listen(PORT, '0.0.0.0', () => {
   ─────────────────────────────
 
 `);
+  setupHooks();
   spawnClaude();
   startDiscovery();
 });
