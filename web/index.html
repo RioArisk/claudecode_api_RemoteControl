@@ -46,10 +46,17 @@ header {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0; z-index: 10;
 }
-.header-left { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+.header-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+.header-info { min-width: 0; flex: 1; }
 .header-left h1 {
-  font-size: 15px; font-weight: 600; color: var(--text);
+  font-size: 14px; font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.header-meta {
+  font-size: 11px; color: var(--text-muted); font-weight: 400;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: block; line-height: 1.3;
 }
 .header-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .hbtn {
@@ -398,7 +405,10 @@ header {
   <header>
     <div class="header-left">
       <span class="status-dot starting" id="status-dot"></span>
-      <h1 id="title">Claude Remote</h1>
+      <div class="header-info">
+        <h1 id="title">Claude Remote</h1>
+        <span class="header-meta" id="header-meta"></span>
+      </div>
     </div>
     <div class="header-right">
       <button class="hbtn" id="btn-terminal" title="Terminal">
@@ -461,6 +471,8 @@ const S = {
   ptyBuffer: '',
   waiting: false,           // true while waiting for assistant response
   thinkingEl: null,         // current thinking indicator element
+  cwd: '',                  // working directory from server
+  model: '',                // model name from assistant events
 };
 
 const $ = id => document.getElementById(id);
@@ -535,6 +547,26 @@ function updateSendBtn() {
 
 function updateScrollBtn() {
   $('btn-scroll').classList.toggle('visible', !S.isAtBottom);
+}
+
+function shortenPath(p) {
+  if (!p) return '';
+  const parts = p.replace(/\\/g, '/').replace(/\/$/, '').split('/');
+  if (parts.length <= 2) return parts.join('/');
+  return parts.slice(-2).join('/');
+}
+
+function formatModel(m) {
+  if (!m) return '';
+  return m.replace(/^claude-/, '').replace(/-(\d)/g, ' $1').replace(/-/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function updateHeaderInfo() {
+  const path = shortenPath(S.cwd);
+  const model = formatModel(S.model);
+  $('title').textContent = path || 'Claude Remote';
+  $('header-meta').textContent = model ? model : '';
 }
 
 // ============================================================
@@ -659,6 +691,11 @@ function renderAssistant(evt) {
   const blocks = evt.message.content || [];
   const msgId = evt.message.id;
   const usage = evt.message.usage;
+
+  if (!S.model && evt.message.model) {
+    S.model = evt.message.model;
+    updateHeaderInfo();
+  }
 
   for (const b of blocks) {
     if (b.type === 'thinking' && b.thinking) renderThinking(b);
@@ -843,8 +880,11 @@ function connect() {
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.type === 'pty_output') { term ? term.write(m.data) : (S.ptyBuffer += m.data); }
     else if (m.type === 'log_event') processEvent(m.event);
-    else if (m.type === 'transcript_ready') { setStatus('connected'); $('title').textContent = `Session ${m.sessionId.substring(0,8)}`; }
-    else if (m.type === 'status') setStatus(m.status === 'running' ? 'connected' : 'starting');
+    else if (m.type === 'transcript_ready') { setStatus('connected'); }
+    else if (m.type === 'status') {
+      setStatus(m.status === 'running' ? 'connected' : 'starting');
+      if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
+    }
     else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
   };
   ws.onclose = () => { setStatus('disconnected'); setConnBanner(true, true); setTimeout(connect, 2000); };
