@@ -285,14 +285,6 @@ header {
   transition: all .15s; flex-shrink: 0; margin: 2px;
 }
 #btn-send:hover { background: var(--accent); color: #fff; }
-#btn-scroll {
-  width: 36px; height: 36px; border-radius: 50%;
-  background: var(--bg-white); border: 1px solid var(--border);
-  color: var(--text-muted); cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  transition: all .15s; flex-shrink: 0;
-}
-#btn-scroll:hover { background: var(--bg-hover); color: var(--text); }
 
 /* ===== Terminal Panel ===== */
 #terminal-panel {
@@ -325,6 +317,74 @@ header {
 .welcome h2 { font-size: 18px; color: var(--text-secondary); font-weight: 500; }
 .welcome p { font-size: 14px; max-width: 360px; line-height: 1.6; }
 
+/* ===== Thinking Indicator ===== */
+.thinking-indicator {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 0; animation: fadeUp .2s ease;
+  color: var(--text-muted); font-size: 14px;
+}
+.thinking-indicator .dot-pulse {
+  display: inline-flex; align-items: center; gap: 3px;
+}
+.thinking-indicator .dot-pulse span {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent);
+  animation: dotBounce 1.4s infinite ease-in-out both;
+}
+.thinking-indicator .dot-pulse span:nth-child(1) { animation-delay: 0s; }
+.thinking-indicator .dot-pulse span:nth-child(2) { animation-delay: .16s; }
+.thinking-indicator .dot-pulse span:nth-child(3) { animation-delay: .32s; }
+@keyframes dotBounce {
+  0%,80%,100% { opacity:.25; transform:scale(.8); }
+  40% { opacity:1; transform:scale(1.1); }
+}
+
+/* ===== Input Disabled State ===== */
+#input-area.waiting .input-pill {
+  border-color: var(--border); background: var(--bg);
+}
+#input-area.waiting #input {
+  color: var(--text-muted); pointer-events: none;
+}
+#input-area.waiting #btn-send {
+  opacity: .4; pointer-events: none;
+}
+#btn-send.empty {
+  opacity: .35; pointer-events: none;
+}
+
+/* ===== Scroll-to-bottom (hidden by default) ===== */
+#btn-scroll {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--bg-white); border: 1px solid var(--border);
+  color: var(--text-muted); cursor: pointer;
+  display: none; align-items: center; justify-content: center;
+  transition: all .15s; flex-shrink: 0;
+}
+#btn-scroll.visible { display: flex; }
+#btn-scroll:hover { background: var(--bg-hover); color: var(--text); }
+
+/* ===== Connection Banner ===== */
+#conn-banner {
+  display: none; align-items: center; justify-content: center; gap: 8px;
+  padding: 6px 16px; font-size: 13px; font-weight: 500;
+  color: #fff; background: var(--error);
+  flex-shrink: 0; z-index: 11;
+  animation: fadeUp .2s ease;
+}
+#conn-banner.visible { display: flex; }
+#conn-banner.reconnecting { background: #e8a000; color: #1a1a1a; }
+#conn-banner .banner-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; animation: pulse 1.2s infinite;
+}
+
+/* ===== User Message Timestamp ===== */
+.user-msg-time {
+  font-size: 11px; color: var(--text-muted);
+  margin-top: 4px; text-align: right;
+}
+
 @media (max-width: 600px) {
   #messages { padding: 12px 16px; }
   .step-desc { max-width: 120px; }
@@ -334,6 +394,7 @@ header {
 </head>
 <body>
 <div id="app">
+  <div id="conn-banner"><span class="banner-dot"></span><span id="conn-text">Disconnected</span></div>
   <header>
     <div class="header-left">
       <span class="status-dot starting" id="status-dot"></span>
@@ -398,6 +459,8 @@ const S = {
   isAtBottom: true,
   terminalOpen: false,
   ptyBuffer: '',
+  waiting: false,           // true while waiting for assistant response
+  thinkingEl: null,         // current thinking indicator element
 };
 
 const $ = id => document.getElementById(id);
@@ -429,12 +492,50 @@ function formatTokens(n) {
 // Auto-scroll
 $chat.addEventListener('scroll', () => {
   S.isAtBottom = ($chat.scrollHeight - $chat.scrollTop - $chat.clientHeight) < 60;
+  updateScrollBtn();
 });
 function scrollEnd() {
   if (S.isAtBottom) requestAnimationFrame(() => { $chat.scrollTop = $chat.scrollHeight; });
 }
 
 function removeWelcome() { if ($welcome && $welcome.parentNode) $welcome.remove(); }
+
+// ============================================================
+//  Waiting / Thinking indicator
+// ============================================================
+function setWaiting(on) {
+  S.waiting = on;
+  $('input-area').classList.toggle('waiting', on);
+  if (on) {
+    removeThinkingIndicator();
+    const el = document.createElement('div');
+    el.className = 'thinking-indicator';
+    el.innerHTML = '<div class="dot-pulse"><span></span><span></span><span></span></div><span>Thinking...</span>';
+    $msgs.appendChild(el);
+    S.thinkingEl = el;
+    scrollEnd();
+  } else {
+    removeThinkingIndicator();
+    $input.focus();
+  }
+  updateSendBtn();
+}
+
+function removeThinkingIndicator() {
+  if (S.thinkingEl && S.thinkingEl.parentNode) {
+    S.thinkingEl.remove();
+  }
+  S.thinkingEl = null;
+}
+
+function updateSendBtn() {
+  const empty = !$input.value.trim();
+  $('btn-send').classList.toggle('empty', empty && !S.waiting);
+}
+
+function updateScrollBtn() {
+  $('btn-scroll').classList.toggle('visible', !S.isAtBottom);
+}
 
 // ============================================================
 //  Tool Icons (SVG)
@@ -526,7 +627,10 @@ function processEvent(evt) {
   removeWelcome();
 
   if (evt.type === 'user' && evt.message) renderUser(evt);
-  else if (evt.type === 'assistant' && evt.message) renderAssistant(evt);
+  else if (evt.type === 'assistant' && evt.message) {
+    if (S.waiting) setWaiting(false);
+    renderAssistant(evt);
+  }
   scrollEnd();
 }
 
@@ -543,7 +647,9 @@ function renderUser(evt) {
     if (opt) { opt.removeAttribute('data-optimistic'); return; }
     const el = document.createElement('div');
     el.className = 'user-msg';
-    el.innerHTML = renderMd(c);
+    const now = new Date();
+    const timeStr = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
+    el.innerHTML = renderMd(c) + `<div class="user-msg-time">${timeStr}</div>`;
     $msgs.appendChild(el);
   }
 }
@@ -701,24 +807,29 @@ $('btn-close-terminal').addEventListener('click', () => {
 $input.addEventListener('input', () => {
   $input.style.height = 'auto';
   $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
+  updateSendBtn();
 });
 $input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 $('btn-send').addEventListener('click', send);
 $('btn-scroll').addEventListener('click', () => { $chat.scrollTop = $chat.scrollHeight; });
+updateSendBtn();
 
 function send() {
   const t = $input.value.trim();
-  if (!t || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  if (!t || !S.ws || S.ws.readyState !== WebSocket.OPEN || S.waiting) return;
   removeWelcome(); closeGroup();
+  const now = new Date();
+  const timeStr = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
   const el = document.createElement('div');
   el.className = 'user-msg'; el.dataset.optimistic = '1';
-  el.innerHTML = renderMd(t);
+  el.innerHTML = renderMd(t) + `<div class="user-msg-time">${timeStr}</div>`;
   $msgs.appendChild(el);
   S.isAtBottom = true; scrollEnd();
   S.ws.send(JSON.stringify({ type: 'chat', text: t }));
   $input.value = ''; $input.style.height = 'auto';
+  setWaiting(true);
 }
 
 // ============================================================
@@ -727,16 +838,16 @@ function send() {
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
   S.ws = ws;
-  ws.onopen = () => setStatus('connected');
+  ws.onopen = () => { setStatus('connected'); setConnBanner(false); };
   ws.onmessage = e => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.type === 'pty_output') { term ? term.write(m.data) : (S.ptyBuffer += m.data); }
     else if (m.type === 'log_event') processEvent(m.event);
     else if (m.type === 'transcript_ready') { setStatus('connected'); $('title').textContent = `Session ${m.sessionId.substring(0,8)}`; }
     else if (m.type === 'status') setStatus(m.status === 'running' ? 'connected' : 'starting');
-    else if (m.type === 'pty_exit') setStatus('disconnected');
+    else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
   };
-  ws.onclose = () => { setStatus('disconnected'); setTimeout(connect, 2000); };
+  ws.onclose = () => { setStatus('disconnected'); setConnBanner(true, true); setTimeout(connect, 2000); };
   ws.onerror = () => {};
 }
 
@@ -744,7 +855,15 @@ function setStatus(s) {
   $('status-dot').className = 'status-dot ' + s;
 }
 
+function setConnBanner(show, reconnecting) {
+  const el = $('conn-banner');
+  el.classList.toggle('visible', show);
+  el.classList.toggle('reconnecting', !!reconnecting);
+  $('conn-text').textContent = reconnecting ? 'Reconnecting...' : 'Disconnected';
+}
+
 connect();
+$input.focus();
 </script>
 </body>
 </html>
