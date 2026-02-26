@@ -4,7 +4,12 @@
 // normal terminal prompt (decision: "ask").
 
 const http = require('http');
-const PORT = process.env.BRIDGE_PORT || 3100;
+
+// Only route to WebUI when spawned by bridge server (which sets BRIDGE_PORT).
+// Native Claude instances fall back to normal terminal prompt.
+if (!process.env.BRIDGE_PORT) process.exit(0);
+
+const PORT = process.env.BRIDGE_PORT;
 
 let input = '';
 process.stdin.setEncoding('utf8');

@@ -191,29 +191,67 @@ let ptyTextBuf = '';
 
 function stripAnsi(s) {
   // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1B(?:\[[0-9;]*[A-Za-z]|\].*?(?:\x07|\x1B\\)|\([B0])/g, '');
+  return s.replace(/\x1B(?:\[[\x20-\x3f]*[0-9;]*[A-Za-z]|\].*?(?:\x07|\x1B\\)|\([B0])/g, '');
 }
 
 function detectModeFromPTY(data) {
-  // Accumulate and debounce — Claude Code redraws the full screen
-  ptyTextBuf += data;
-  if (ptyTextBuf.length > 8000) ptyTextBuf = ptyTextBuf.slice(-4000);
+  // Ink (Claude Code's TUI framework) redraws by sending cursor-up
+  // sequences (\x1B[<n>A) followed by new content.  When we detect a
+  // redraw we MUST clear the accumulated text buffer, otherwise stale
+  // mode keywords from previous renders linger and cause false matches.
+  if (/\x1B\[\d*A/.test(data)) {
+    ptyTextBuf = '';
+  }
 
-  const plain = stripAnsi(ptyTextBuf);
+  ptyTextBuf += stripAnsi(data);
+  if (ptyTextBuf.length > 4000) ptyTextBuf = ptyTextBuf.slice(-2000);
+
+  const tail = ptyTextBuf.slice(-500);
+  const lc = tail.toLowerCase();
 
   let detected = null;
-  // Match Claude Code status bar mode indicators
-  if (/plan mode on/i.test(plain) || /\u23F8\s*plan/i.test(plain)) {
-    detected = 'plan';
-  } else if (/accept edits on/i.test(plain) || /\u23F5\u23F5\s*accept/i.test(plain)) {
-    detected = 'acceptEdits';
-  } else if (/bypass.*on/i.test(plain)) {
-    detected = 'bypassPermissions';
-  }
-  // "shift+tab to cycle" without a mode prefix = default
-  if (!detected && /shift\+tab to cycle/i.test(plain)) {
-    // Only if none of the above matched
-    detected = 'default';
+
+  // The status bar always contains "for shortcuts".
+  // (Older versions: "shift+tab to cycle", newer: "? for shortcuts")
+  const anchorIdx = Math.max(lc.lastIndexOf('for shortcuts'), lc.lastIndexOf('shift+tab'));
+
+  if (anchorIdx >= 0) {
+    // Inspect ~80 chars BEFORE and AFTER the anchor.
+    // The mode label can appear on either side depending on status bar layout:
+    //   "⏸ plan mode on  ? for shortcuts"   ← mode BEFORE anchor
+    //   "? for shortcuts  ⏵⏵ accept edits"  ← mode AFTER anchor
+    const before = lc.slice(Math.max(0, anchorIdx - 80), anchorIdx);
+    const after  = lc.slice(anchorIdx, Math.min(lc.length, anchorIdx + 80));
+    const win = before + after;
+    log(`Mode window: [${win}]`);
+
+    if (win.includes('plan')) {
+      detected = 'plan';
+    } else if (win.includes('accept')) {
+      detected = 'acceptEdits';
+    } else if (win.includes('bypass')) {
+      detected = 'bypassPermissions';
+    } else {
+      // Status bar present but no mode keyword → default
+      detected = 'default';
+    }
+  } else {
+    // No status-bar anchor — check for explicit toggle messages
+    // that Claude prints when mode changes (e.g. "⏸ plan mode on")
+    if (/plan mode on/i.test(lc) || /\u23F8\s*plan/i.test(tail)) {
+      detected = 'plan';
+    } else if (/accept edits on/i.test(lc) || /\u23F5\u23F5\s*accept/i.test(tail)) {
+      detected = 'acceptEdits';
+    } else if (/bypass.*on/i.test(lc)) {
+      detected = 'bypassPermissions';
+    }
+    // Check if buffer has status-bar content but anchor was mangled
+    // If we see mode indicators like ⏸ or ⏵⏵ without explicit text
+    else if (tail.includes('\u23F8')) {
+      detected = 'plan';
+    } else if (tail.includes('\u23F5\u23F5')) {
+      detected = 'acceptEdits';
+    }
   }
 
   if (detected && detected !== currentMode) {

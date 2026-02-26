@@ -58,14 +58,6 @@ header {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   display: flex; align-items: center; gap: 6px; line-height: 1.3;
 }
-.mode-badge {
-  display: none; font-size: 10px; font-weight: 600;
-  padding: 1px 6px; border-radius: 4px; flex-shrink: 0;
-  letter-spacing: .3px; text-transform: uppercase;
-}
-.mode-badge.plan { display: inline; background: #fff3e0; color: #e8a000; }
-.mode-badge.acceptEdits { display: inline; background: var(--accent-light); color: var(--accent); }
-.mode-badge.bypassPermissions { display: inline; background: var(--error-bg); color: var(--error); }
 .header-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .hbtn {
   width: 32px; height: 32px; border: none; border-radius: 8px;
@@ -104,6 +96,21 @@ header {
   animation: fadeUp .2s ease;
 }
 @keyframes fadeUp { from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)} }
+
+/* Toast */
+#toast-container {
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 9999; display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  background: var(--text); color: #fff; padding: 10px 20px;
+  border-radius: 20px; font-size: 13px; white-space: nowrap;
+  animation: toastIn .3s ease, toastOut .3s ease 2.7s forwards;
+  box-shadow: 0 4px 12px rgba(0,0,0,.15);
+}
+@keyframes toastIn { from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)} }
+@keyframes toastOut { from{opacity:1}to{opacity:0;transform:translateY(-10px)} }
 
 /* ===== Assistant Text ===== */
 .assistant-text {
@@ -301,6 +308,36 @@ header {
   transition: all .15s; flex-shrink: 0; margin: 2px;
 }
 #btn-send:hover { background: var(--accent); color: #fff; }
+
+/* ===== Mode Toggle Button ===== */
+#btn-mode {
+  height: 32px; border: 1px solid var(--border); border-radius: 16px;
+  background: var(--bg-white); cursor: pointer;
+  display: flex; align-items: center; gap: 5px;
+  padding: 0 10px 0 8px; flex-shrink: 0;
+  transition: all .15s; font-family: inherit;
+  white-space: nowrap;
+}
+#btn-mode:hover { border-color: var(--text-muted); }
+#btn-mode:active { transform: scale(.96); }
+#btn-mode.switching { opacity: .5; pointer-events: none; }
+#btn-mode .mode-icon {
+  width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted); flex-shrink: 0;
+}
+#btn-mode .mode-label {
+  font-size: 12px; font-weight: 600; color: var(--text-secondary);
+  letter-spacing: .2px;
+}
+#btn-mode.plan { border-color: #e8a000; background: #fff3e0; }
+#btn-mode.plan .mode-label { color: #e8a000; }
+#btn-mode.plan .mode-icon { color: #e8a000; }
+#btn-mode.acceptEdits { border-color: var(--accent); background: var(--accent-light); }
+#btn-mode.acceptEdits .mode-label { color: var(--accent); }
+#btn-mode.acceptEdits .mode-icon { color: var(--accent); }
+#btn-mode.bypassPermissions { border-color: var(--error); background: var(--error-bg); }
+#btn-mode.bypassPermissions .mode-label { color: var(--error); }
+#btn-mode.bypassPermissions .mode-icon { color: var(--error); }
 
 /* ===== Terminal Panel ===== */
 #terminal-panel {
@@ -508,7 +545,9 @@ header {
   display: flex; align-items: center; justify-content: center;
   font-size: 12px; font-weight: 600; color: var(--text-muted); flex-shrink: 0;
 }
+.model-item .mi-info { display: flex; flex-direction: column; gap: 2px; }
 .model-item .mi-name { font-size: 14px; color: var(--text); }
+.model-item .mi-desc { font-size: 12px; color: var(--text-muted); }
 
 @media (max-width: 600px) {
   #messages { padding: 12px 16px; }
@@ -519,6 +558,7 @@ header {
 </head>
 <body>
 <div id="app">
+  <div id="toast-container"></div>
   <div id="conn-banner"><span class="banner-dot"></span><span id="conn-text">Disconnected</span></div>
   <header>
     <div class="header-left">
@@ -527,7 +567,6 @@ header {
         <h1 id="title">Claude Remote</h1>
         <span class="header-meta" id="header-meta">
           <span id="header-model"></span>
-          <span class="mode-badge" id="mode-badge"></span>
         </span>
       </div>
     </div>
@@ -551,6 +590,10 @@ header {
   <div id="input-area">
     <div id="cmd-menu"></div>
     <div id="input-row">
+      <button id="btn-mode" title="Switch mode (Shift+Tab)">
+        <span class="mode-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></span>
+        <span class="mode-label" id="mode-label">Default</span>
+      </button>
       <div class="input-pill">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
         <textarea id="input" placeholder="Reply..." rows="1"></textarea>
@@ -622,7 +665,7 @@ const S = {
   cwd: '',                  // working directory from server
   model: '',                // model name from assistant events
   mode: 'default',          // permission mode
-  pendingPermId: null,      // current permission request id
+  pendingPerms: [],          // queue of permission requests [{id, toolName, toolInput}]
 };
 
 const $ = id => document.getElementById(id);
@@ -634,6 +677,14 @@ const $welcome = $('welcome');
 // ============================================================
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function trunc(s, n) { return (!s || s.length <= n) ? s : s.substring(0, n) + '...'; }
+
+function showToast(text) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = text;
+  $('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
 
 function renderMd(text) {
   try {
@@ -717,16 +768,15 @@ function updateHeaderInfo() {
   const model = formatModel(S.model);
   $('title').textContent = pathStr || 'Claude Remote';
   $('header-model').textContent = model;
+  updateModeButton();
+}
 
-  const badge = $('mode-badge');
-  badge.className = 'mode-badge';  // reset
-  const labels = { plan: 'Plan', acceptEdits: 'Accept Edits', bypassPermissions: 'Bypass', dontAsk: 'Auto' };
-  if (labels[S.mode]) {
-    badge.textContent = labels[S.mode];
-    badge.classList.add(S.mode);
-  } else {
-    badge.textContent = '';
-  }
+function updateModeButton() {
+  const btn = $('btn-mode');
+  btn.className = '';  // reset
+  const labels = { default: 'Default', plan: 'Plan', acceptEdits: 'Accept Edits', bypassPermissions: 'Bypass' };
+  $('mode-label').textContent = labels[S.mode] || 'Default';
+  if (S.mode !== 'default') btn.classList.add(S.mode);
 }
 
 // ============================================================
@@ -854,6 +904,7 @@ function processEvent(evt) {
       if (modelMatch) {
         S.model = modelMatch[1];
         updateHeaderInfo();
+        showToast('Model switched to ' + formatModel(S.model));
       }
       if (isJunkContent(txt)) return;
     }
@@ -1051,9 +1102,11 @@ const COMMANDS = [
 ];
 
 const MODELS = [
-  { num: '1', id: 'opus', label: 'Claude Opus 4.6' },
-  { num: '2', id: 'sonnet', label: 'Claude Sonnet 4.6' },
-  { num: '3', id: 'haiku', label: 'Claude Haiku 4.5' },
+  { num: '1', id: 'default', label: 'Default (Sonnet 4.6)', desc: 'Recommended' },
+  { num: '2', id: 'sonnet-1m', label: 'Sonnet (1M context)', desc: 'Long sessions' },
+  { num: '3', id: 'opus', label: 'Opus', desc: 'Most capable' },
+  { num: '4', id: 'opus-1m', label: 'Opus (1M context)', desc: 'Long sessions' },
+  { num: '5', id: 'haiku', label: 'Haiku', desc: 'Fast answers' },
 ];
 
 let cmdMenuOpen = false;
@@ -1103,7 +1156,12 @@ function execCmd(cmd) {
 
 function sendSlashCmd(text) {
   if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
-  S.ws.send(JSON.stringify({ type: 'chat', text }));
+  // Send Escape first to cancel any existing PTY interactive prompt (e.g. model selection)
+  S.ws.send(JSON.stringify({ type: 'input', data: '\x1b' }));
+  setTimeout(() => {
+    if (S.ws?.readyState === WebSocket.OPEN)
+      S.ws.send(JSON.stringify({ type: 'chat', text }));
+  }, 100);
 }
 
 function showModelPicker() {
@@ -1111,20 +1169,30 @@ function showModelPicker() {
   list.innerHTML = MODELS.map(m =>
     `<div class="model-item" data-num="${m.num}">
       <span class="mi-num">${m.num}</span>
-      <span class="mi-name">${m.label}</span>
+      <div class="mi-info">
+        <span class="mi-name">${m.label}</span>
+        <span class="mi-desc">${m.desc}</span>
+      </div>
     </div>`
   ).join('');
 
   list.querySelectorAll('.model-item').forEach(el => {
     el.addEventListener('click', () => {
       hideModelPicker();
-      // Send /model then the number
-      sendSlashCmd('/model');
+      if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+      // Escape to cancel any existing PTY interactive prompt
+      S.ws.send(JSON.stringify({ type: 'input', data: '\x1b' }));
+      // Send /model command (300ms after Escape so Ink finishes parsing standalone Esc)
       setTimeout(() => {
-        if (S.ws?.readyState === WebSocket.OPEN) {
+        if (S.ws?.readyState === WebSocket.OPEN)
+          S.ws.send(JSON.stringify({ type: 'chat', text: '/model' }));
+      }, 300);
+      // After model selection fully renders, send number via chat
+      // (chat = server writes digit, then \r 150ms later — matches Ink's expected input cadence)
+      setTimeout(() => {
+        if (S.ws?.readyState === WebSocket.OPEN)
           S.ws.send(JSON.stringify({ type: 'chat', text: el.dataset.num }));
-        }
-      }, 500);
+      }, 2000);
     });
   });
 
@@ -1181,6 +1249,20 @@ $input.addEventListener('keydown', e => {
 });
 $('btn-send').addEventListener('click', send);
 $('btn-scroll').addEventListener('click', () => { $chat.scrollTop = $chat.scrollHeight; });
+
+// Mode toggle — sends Shift+Tab to PTY, debounced
+let modeSwitching = false;
+$('btn-mode').addEventListener('click', () => {
+  if (modeSwitching || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  modeSwitching = true;
+  $('btn-mode').classList.add('switching');
+  S.ws.send(JSON.stringify({ type: 'input', data: '\x1b[Z' }));
+  // Unlock after mode detection fires or timeout
+  setTimeout(() => {
+    modeSwitching = false;
+    $('btn-mode').classList.remove('switching');
+  }, 800);
+});
 updateSendBtn();
 
 function send() {
@@ -1217,7 +1299,12 @@ function connect() {
     }
     else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
     else if (m.type === 'permission_request') showPermission(m);
-    else if (m.type === 'mode') { S.mode = m.mode; updateHeaderInfo(); }
+    else if (m.type === 'mode') {
+      S.mode = m.mode; updateHeaderInfo();
+      // Unlock mode button early on actual mode change
+      modeSwitching = false;
+      $('btn-mode').classList.remove('switching');
+    }
   };
   ws.onclose = () => { setStatus('disconnected'); setConnBanner(true, true); setTimeout(connect, 2000); };
   ws.onerror = () => {};
@@ -1254,21 +1341,48 @@ function permToolDetail(name, input) {
 }
 
 function showPermission(m) {
-  S.pendingPermId = m.id;
-  $('perm-tool-name').textContent = m.toolName;
-  $('perm-detail').textContent = permToolDetail(m.toolName, m.toolInput);
+  S.pendingPerms.push({ id: m.id, toolName: m.toolName, toolInput: m.toolInput });
+  // Only refresh overlay if this is the first (or overlay not yet showing)
+  if (S.pendingPerms.length === 1) showNextPerm();
+  else updatePermCounter();
+}
+
+function showNextPerm() {
+  if (S.pendingPerms.length === 0) {
+    $('perm-overlay').classList.remove('visible');
+    return;
+  }
+  const p = S.pendingPerms[0];
+  $('perm-tool-name').textContent = p.toolName;
+  $('perm-detail').textContent = permToolDetail(p.toolName, p.toolInput);
   $('perm-overlay').classList.add('visible');
+  updatePermCounter();
+}
+
+function updatePermCounter() {
+  let counter = $('perm-counter');
+  if (!counter) {
+    counter = document.createElement('span');
+    counter.id = 'perm-counter';
+    counter.style.cssText = 'font-size:12px;color:var(--text-muted);margin-left:8px;';
+    $('perm-tool-name').parentNode.appendChild(counter);
+  }
+  if (S.pendingPerms.length > 1) {
+    counter.textContent = `(1/${S.pendingPerms.length})`;
+  } else {
+    counter.textContent = '';
+  }
 }
 
 function resolvePermission(decision) {
-  if (!S.pendingPermId || !S.ws) return;
+  if (S.pendingPerms.length === 0 || !S.ws) return;
+  const p = S.pendingPerms.shift();
   S.ws.send(JSON.stringify({
     type: 'permission_response',
-    id: S.pendingPermId,
+    id: p.id,
     decision,
   }));
-  S.pendingPermId = null;
-  $('perm-overlay').classList.remove('visible');
+  showNextPerm();
 }
 
 $('perm-allow').addEventListener('click', () => resolvePermission('allow'));
