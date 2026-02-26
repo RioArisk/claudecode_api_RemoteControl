@@ -1,0 +1,14 @@
+{
+  "name": "claude-remote-android",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

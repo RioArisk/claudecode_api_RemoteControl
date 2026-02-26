@@ -333,7 +333,7 @@ function spawnClaude() {
 //  4. Transcript Discovery & Tailing
 // ============================================================
 function getProjectSlug(cwd) {
-  return cwd.replace(/[:\\/]/g, '-');
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 function snapshotExistingFiles() {

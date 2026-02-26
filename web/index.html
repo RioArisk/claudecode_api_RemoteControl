@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Claude Remote</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -87,14 +87,32 @@ header {
 
 /* ===== User Message ===== */
 .user-msg {
-  margin: 20px 0 8px;
-  padding: 12px 16px;
-  background: var(--user-bg);
-  border-radius: var(--radius);
-  font-size: 15px; line-height: 1.6;
-  color: var(--text);
+  margin: 16px 0 8px;
+  margin-left: auto;
+  max-width: 80%;
+  width: fit-content;
+  padding: 10px 16px;
+  background: #1967d2;
+  color: #fff;
+  border-radius: 18px 18px 4px 18px;
+  font-size: 15px; line-height: 1.5;
+  word-break: break-word;
   animation: fadeUp .2s ease;
 }
+.user-msg p { margin: 0; }
+.user-msg p + p { margin-top: 4px; }
+.user-msg code {
+  background: rgba(255,255,255,.18); border: none;
+  padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: .88em;
+  color: #fff;
+}
+.user-msg pre {
+  background: rgba(255,255,255,.12);
+  border: none; border-radius: 8px; padding: 10px; margin: 6px 0;
+  overflow-x: auto;
+}
+.user-msg pre code { background: none; padding: 0; font-size: 13px; }
+.user-msg a { color: #b3d4ff; }
 @keyframes fadeUp { from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)} }
 
 /* Toast */
@@ -195,6 +213,7 @@ header {
   position: relative; cursor: pointer;
   border-radius: var(--radius-sm);
   transition: background .1s;
+  overflow: hidden;
 }
 .step-item:hover { background: var(--bg-hover); }
 /* timeline line */
@@ -206,6 +225,30 @@ header {
 .step-item:first-child::before { top: 50%; }
 .step-item:last-child::before { bottom: 50%; }
 .step-item:only-child::before { display: none; }
+
+/* Shimmer loading effect for running tools */
+.step-item.loading::after {
+  content: ''; position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(45,138,110,.06) 30%,
+    rgba(45,138,110,.12) 50%,
+    rgba(45,138,110,.06) 70%,
+    transparent 100%
+  );
+  animation: shimmer 1.8s infinite ease-in-out;
+  pointer-events: none;
+}
+@keyframes shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.step-item.loading .step-icon {
+  border-color: var(--accent);
+  animation: pulse 1.2s infinite;
+}
 
 .step-icon {
   width: 32px; height: 32px; border-radius: 50%;
@@ -339,27 +382,6 @@ header {
 #btn-mode.bypassPermissions .mode-label { color: var(--error); }
 #btn-mode.bypassPermissions .mode-icon { color: var(--error); }
 
-/* ===== Terminal Panel ===== */
-#terminal-panel {
-  position: fixed; bottom: 0; left: 0; right: 0;
-  background: #1a1a2e; z-index: 100;
-  border-top: 2px solid var(--accent);
-  transition: transform .3s ease;
-  height: 50vh;
-}
-#terminal-panel.hidden { transform: translateY(100%); pointer-events: none; }
-#terminal-bar {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 12px; background: #111;
-  font-size: 12px; color: #aaa; font-weight: 600;
-  letter-spacing: .5px;
-}
-#terminal-bar button {
-  background: none; border: none; color: #888; cursor: pointer;
-  font-size: 18px; padding: 2px 6px; border-radius: 4px;
-}
-#terminal-bar button:hover { background: rgba(255,255,255,.1); color: #fff; }
-#terminal { height: calc(100% - 34px); }
 
 /* ===== Welcome ===== */
 .welcome {
@@ -369,6 +391,49 @@ header {
 .welcome svg { opacity: .2; }
 .welcome h2 { font-size: 18px; color: var(--text-secondary); font-weight: 500; }
 .welcome p { font-size: 14px; max-width: 360px; line-height: 1.6; }
+
+/* ===== Command Overlay (compact spinner etc.) ===== */
+#cmd-overlay {
+  display: none; position: fixed; inset: 0; z-index: 150;
+  background: rgba(0,0,0,.25);
+  align-items: center; justify-content: center;
+}
+#cmd-overlay.visible { display: flex; }
+.cmd-overlay-card {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  padding: 32px 40px; border-radius: 16px;
+  background: var(--bg-white);
+  box-shadow: 0 8px 32px rgba(0,0,0,.12);
+  animation: fadeUp .2s ease;
+}
+.cmd-overlay-spinner {
+  width: 36px; height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.cmd-overlay-label {
+  font-size: 14px; font-weight: 500; color: var(--text-secondary);
+}
+
+/* ===== Compact Summary Divider ===== */
+.compact-divider {
+  display: flex; align-items: center; gap: 12px;
+  margin: 20px 0 16px; animation: fadeUp .3s ease;
+}
+.compact-line {
+  flex: 1; height: 1px; background: var(--border);
+}
+.compact-badge {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 16px;
+  background: var(--bg-white); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text-muted); font-weight: 500;
+  white-space: nowrap; flex-shrink: 0;
+}
+.compact-badge svg { opacity: .6; }
 
 /* ===== Thinking Indicator ===== */
 .thinking-indicator {
@@ -432,11 +497,6 @@ header {
   background: currentColor; animation: pulse 1.2s infinite;
 }
 
-/* ===== User Message Timestamp ===== */
-.user-msg-time {
-  font-size: 11px; color: var(--text-muted);
-  margin-top: 4px; text-align: right;
-}
 
 /* ===== Permission Overlay ===== */
 #perm-overlay {
@@ -571,9 +631,6 @@ header {
       </div>
     </div>
     <div class="header-right">
-      <button class="hbtn" id="btn-terminal" title="Terminal">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
-      </button>
     </div>
   </header>
 
@@ -633,17 +690,8 @@ header {
     </div>
   </div>
 
-  <div id="terminal-panel" class="hidden">
-    <div id="terminal-bar">
-      <span>TERMINAL</span>
-      <button id="btn-close-terminal">&times;</button>
-    </div>
-    <div id="terminal"></div>
-  </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>
@@ -658,8 +706,6 @@ const S = {
   currentGroup: null,       // current step-group element
   currentGroupCount: 0,
   isAtBottom: true,
-  terminalOpen: false,
-  ptyBuffer: '',
   waiting: false,           // true while waiting for assistant response
   thinkingEl: null,         // current thinking indicator element
   cwd: '',                  // working directory from server
@@ -889,6 +935,13 @@ function processEvent(evt) {
   if (evt.uuid) S.seenUuids.add(evt.uuid);
   removeWelcome();
 
+  // Compact summary: collapse all previous messages
+  if (evt.isCompactSummary) {
+    renderCompactSummary(evt);
+    scrollEnd();
+    return;
+  }
+
   // Filter slash command pollution from JSONL
   if (evt.type === 'user' && evt.message) {
     const c = evt.message.content;
@@ -931,11 +984,36 @@ function renderUser(evt) {
     if (opt) { opt.removeAttribute('data-optimistic'); return; }
     const el = document.createElement('div');
     el.className = 'user-msg';
-    const now = new Date();
-    const timeStr = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
-    el.innerHTML = renderMd(c) + `<div class="user-msg-time">${timeStr}</div>`;
+    el.innerHTML = renderMd(c);
     $msgs.appendChild(el);
   }
+}
+
+// --- Compact Summary ---
+function renderCompactSummary(evt) {
+  // Dismiss the command overlay
+  hideCmdOverlay();
+  $('input-area').classList.remove('waiting');
+  if (S.waiting) setWaiting(false);
+
+  closeGroup();
+  S.messageMap.clear();
+  S.toolMap.clear();
+  S.currentGroup = null;
+  S.currentGroupCount = 0;
+  $msgs.innerHTML = '';
+
+  const el = document.createElement('div');
+  el.className = 'compact-divider';
+  el.innerHTML = `
+    <div class="compact-line"></div>
+    <div class="compact-badge">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.66 0 3-4.03 3-9s-1.34-9-3-9m0 18c-1.66 0-3-4.03-3-9s1.34-9 3-9"/></svg>
+      <span>历史对话已压缩</span>
+    </div>
+    <div class="compact-line"></div>
+  `;
+  $msgs.appendChild(el);
 }
 
 // --- Assistant ---
@@ -1007,7 +1085,7 @@ function renderTool(b) {
 
   const desc = toolDesc(b.name, b.input);
   const item = document.createElement('div');
-  item.className = 'step-item';
+  item.className = 'step-item loading';
   item.innerHTML = `
     <div class="step-icon">${iconFor(b.name)}</div>
     <span class="step-name">${esc(b.name)}</span>
@@ -1036,6 +1114,7 @@ function renderTool(b) {
 function attachResult(b) {
   const info = S.toolMap.get(b.tool_use_id);
   if (!info) return;
+  info.item.classList.remove('loading');
 
   const isErr = b.is_error === true;
   if (isErr) info.detail.classList.add('error');
@@ -1053,42 +1132,6 @@ function attachResult(b) {
   // Show duration from toolUseResult if available
   // (will be set by the system event; for now leave blank)
 }
-
-// ============================================================
-//  Terminal
-// ============================================================
-let term = null, fitAddon = null;
-function initTerm() {
-  if (term) return;
-  term = new Terminal({
-    theme: { background: '#0f0f23', foreground: '#e8e6f3', cursor: '#a78bfa', selectionBackground: 'rgba(167,139,250,.3)' },
-    fontFamily: "'Cascadia Code','Fira Code','JetBrains Mono',monospace",
-    fontSize: 13, cursorBlink: true, scrollback: 5000,
-  });
-  fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open($('terminal'));
-  fitAddon.fit();
-  if (S.ptyBuffer) { term.write(S.ptyBuffer); S.ptyBuffer = ''; }
-  term.onData(d => { if (S.ws?.readyState === WebSocket.OPEN) S.ws.send(JSON.stringify({ type: 'input', data: d })); });
-  new ResizeObserver(() => {
-    if (fitAddon && S.terminalOpen) {
-      try { fitAddon.fit(); S.ws?.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); } catch {}
-    }
-  }).observe($('terminal'));
-}
-
-$('btn-terminal').addEventListener('click', () => {
-  S.terminalOpen = !S.terminalOpen;
-  $('terminal-panel').classList.toggle('hidden', !S.terminalOpen);
-  $('btn-terminal').classList.toggle('active', S.terminalOpen);
-  if (S.terminalOpen) { if (!term) initTerm(); setTimeout(() => fitAddon?.fit(), 150); }
-});
-$('btn-close-terminal').addEventListener('click', () => {
-  S.terminalOpen = false;
-  $('terminal-panel').classList.add('hidden');
-  $('btn-terminal').classList.remove('active');
-});
 
 // ============================================================
 //  Slash Commands
@@ -1139,6 +1182,13 @@ function hideCmdMenu() {
   cmdActiveIdx = -1;
 }
 
+const CMD_FEEDBACK = {
+  '/compact': { toast: null, overlay: true, label: '对话压缩中...' },
+  '/clear':   { toast: 'Clearing conversation...', overlay: false },
+  '/cost':    { toast: 'Fetching token costs...', overlay: false },
+  '/help':    { toast: 'Loading help...', overlay: false },
+};
+
 function execCmd(cmd) {
   hideCmdMenu();
   $input.value = '';
@@ -1150,7 +1200,11 @@ function execCmd(cmd) {
     return;
   }
 
-  // Other commands: send directly through PTY
+  const fb = CMD_FEEDBACK[cmd];
+  if (fb) {
+    if (fb.overlay) showCmdOverlay(fb.label);
+    else if (fb.toast) showToast(fb.toast);
+  }
   sendSlashCmd(cmd);
 }
 
@@ -1162,6 +1216,32 @@ function sendSlashCmd(text) {
     if (S.ws?.readyState === WebSocket.OPEN)
       S.ws.send(JSON.stringify({ type: 'chat', text }));
   }, 100);
+}
+
+// ============================================================
+//  Command Overlay (blocking spinner for /compact etc.)
+// ============================================================
+function showCmdOverlay(label) {
+  let ov = $('cmd-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'cmd-overlay';
+    ov.innerHTML = `
+      <div class="cmd-overlay-card">
+        <div class="cmd-overlay-spinner"></div>
+        <span class="cmd-overlay-label"></span>
+      </div>
+    `;
+    document.getElementById('app').appendChild(ov);
+  }
+  ov.querySelector('.cmd-overlay-label').textContent = label;
+  ov.classList.add('visible');
+  $('input-area').classList.add('waiting');
+}
+
+function hideCmdOverlay() {
+  const ov = $('cmd-overlay');
+  if (ov) ov.classList.remove('visible');
 }
 
 function showModelPicker() {
@@ -1178,8 +1258,10 @@ function showModelPicker() {
 
   list.querySelectorAll('.model-item').forEach(el => {
     el.addEventListener('click', () => {
+      const picked = MODELS.find(m => m.num === el.dataset.num);
       hideModelPicker();
       if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+      showToast('Switching to ' + (picked ? picked.label : 'model') + '...');
       // Escape to cancel any existing PTY interactive prompt
       S.ws.send(JSON.stringify({ type: 'input', data: '\x1b' }));
       // Send /model command (300ms after Escape so Ink finishes parsing standalone Esc)
@@ -1268,12 +1350,17 @@ updateSendBtn();
 function send() {
   const t = $input.value.trim();
   if (!t || !S.ws || S.ws.readyState !== WebSocket.OPEN || S.waiting) return;
+
+  // Intercept slash commands typed directly
+  if (/^\/[a-z]+$/i.test(t)) {
+    execCmd(t);
+    return;
+  }
+
   removeWelcome(); closeGroup();
-  const now = new Date();
-  const timeStr = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
   const el = document.createElement('div');
   el.className = 'user-msg'; el.dataset.optimistic = '1';
-  el.innerHTML = renderMd(t) + `<div class="user-msg-time">${timeStr}</div>`;
+  el.innerHTML = renderMd(t);
   $msgs.appendChild(el);
   S.isAtBottom = true; scrollEnd();
   S.ws.send(JSON.stringify({ type: 'chat', text: t }));
@@ -1290,7 +1377,7 @@ function connect() {
   ws.onopen = () => { setStatus('connected'); setConnBanner(false); };
   ws.onmessage = e => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
-    if (m.type === 'pty_output') { term ? term.write(m.data) : (S.ptyBuffer += m.data); }
+    if (m.type === 'pty_output') { /* ignored – terminal panel removed */ }
     else if (m.type === 'log_event') processEvent(m.event);
     else if (m.type === 'transcript_ready') { setStatus('connected'); }
     else if (m.type === 'status') {
@@ -1390,6 +1477,19 @@ $('perm-deny').addEventListener('click', () => resolvePermission('deny'));
 
 connect();
 $input.focus();
+
+// External links — open in new tab
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[href]');
+  if (!a) return;
+  const href = a.getAttribute('href');
+  if (!href) return;
+  if (/^https?:\/\//i.test(href)) {
+    e.preventDefault();
+    e.stopPropagation();
+    window.open(href, '_blank');
+  }
+});
 </script>
 </body>
 </html>

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Claude Remote</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ===== Connect Screen ===== -->
+<div id="connect-screen">
+  <div class="connect-card">
+    <div class="connect-logo">
+      <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+        <circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/>
+      </svg>
+    </div>
+    <h1>Claude Remote</h1>
+    <p class="connect-desc">Connect to your Claude Bridge server</p>
+
+    <div class="connect-form">
+      <label class="connect-label">Server Address</label>
+      <div class="connect-input-row">
+        <input id="server-addr" type="text" placeholder="192.168.1.100:3100"
+               inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
+
+      <div class="connect-history" id="connect-history"></div>
+
+      <button id="btn-connect" class="connect-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        <span>Connect</span>
+      </button>
+
+      <div class="connect-error" id="connect-error"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Main App ===== -->
+<div id="app" class="hidden">
+  <div id="toast-container"></div>
+  <div id="conn-banner"><span class="banner-dot"></span><span id="conn-text">Disconnected</span></div>
+
+  <header>
+    <div class="header-left">
+      <button class="hbtn" id="btn-back" title="Disconnect">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <span class="status-dot starting" id="status-dot"></span>
+      <div class="header-info">
+        <h1 id="title">Claude Remote</h1>
+        <span class="header-meta" id="header-meta">
+          <span id="header-model"></span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <div id="chat-area">
+    <div id="messages">
+      <div class="welcome" id="welcome">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+        <h2>Claude Remote Control</h2>
+        <p>Connected. Send a message below to start.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="input-area">
+    <div id="cmd-menu"></div>
+    <div id="input-row">
+      <button id="btn-mode" title="Switch mode (Shift+Tab)">
+        <span class="mode-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></span>
+        <span class="mode-label" id="mode-label">Default</span>
+      </button>
+      <div class="input-pill">
+        <textarea id="input" placeholder="Reply..." rows="1"></textarea>
+        <button id="btn-send" title="Send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </div>
+      <button id="btn-scroll" title="Scroll to bottom">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Model Picker -->
+  <div id="model-picker">
+    <div id="model-dialog">
+      <div class="model-title">Switch Model</div>
+      <div id="model-list"></div>
+    </div>
+  </div>
+
+  <!-- Permission Overlay -->
+  <div id="perm-overlay">
+    <div id="perm-dialog">
+      <div class="perm-header">
+        <div class="perm-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        </div>
+        <div>
+          <div class="perm-title" id="perm-tool-name">Bash</div>
+          <div class="perm-sub">Requesting permission</div>
+        </div>
+      </div>
+      <div class="perm-detail" id="perm-detail"></div>
+      <div class="perm-actions">
+        <button class="perm-btn-deny" id="perm-deny">Deny</button>
+        <button class="perm-btn-allow" id="perm-allow">Allow</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for Claude Remote Android app",
+  "windows": ["*"],
+  "permissions": [
+    "core:default"
+  ]
+}
