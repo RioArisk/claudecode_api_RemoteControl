@@ -36,14 +36,15 @@
 ### 1. 启动 Bridge Server
 
 ```bash
-# 安装依赖
+# 首次运行先安装依赖
+cd /path/to/claudecode_api_RemoteControl
 npm install
 
-# 启动（默认端口 3100）
-node server.js
+# 在任意项目目录下，用完整路径启动（默认端口 3100）
+node /path/to/claudecode_api_RemoteControl/server.js
 
 # 或指定端口
-PORT=8080 node server.js
+PORT=8080 node /path/to/claudecode_api_RemoteControl/server.js
 ```
 
 ### 2. 手机浏览器访问
