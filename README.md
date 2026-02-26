@@ -1,4 +1,4 @@
-# Claude Remote Control
+# Claude API Remote Control
 
 > 在手机上远程操控 Claude Code —— 随时随地写代码、审批权限、切换模型。
 
