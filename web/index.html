@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Claude Remote</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #f5f5f0;
+  --bg-white: #ffffff;
+  --bg-hover: #eeeee8;
+  --border: #e2e2da;
+  --border-light: #ebebeb;
+  --text: #1a1a1a;
+  --text-secondary: #6b6b6b;
+  --text-muted: #9a9a9a;
+  --accent: #2d8a6e;
+  --accent-light: #e8f5ef;
+  --accent-bg: #f0faf5;
+  --user-bg: #e8f0fe;
+  --user-accent: #1967d2;
+  --error: #d93025;
+  --error-bg: #fce8e6;
+  --timeline: #d0d0c8;
+  --code-bg: #f8f8f5;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+}
+html, body {
+  height: 100%; background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'PingFang SC', sans-serif;
+  font-size: 15px; line-height: 1.65; overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+/* ===== Header ===== */
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0; z-index: 10;
+}
+.header-left { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+.header-left h1 {
+  font-size: 15px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.header-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.hbtn {
+  width: 32px; height: 32px; border: none; border-radius: 8px;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+}
+.hbtn:hover { background: var(--bg-hover); color: var(--text); }
+.hbtn.active { color: var(--accent); background: var(--accent-light); }
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.status-dot.connected { background: var(--accent); }
+.status-dot.disconnected { background: var(--error); }
+.status-dot.starting { background: #e8a000; animation: pulse 1.2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1}50%{opacity:.3} }
+
+/* ===== Chat Area ===== */
+#chat-area {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  padding: 0 0 16px;
+  -webkit-overflow-scrolling: touch;
+}
+#chat-area::-webkit-scrollbar { width: 4px; }
+#chat-area::-webkit-scrollbar-thumb { background: var(--timeline); border-radius: 2px; }
+#messages { max-width: 720px; margin: 0 auto; padding: 16px 20px; }
+
+/* ===== User Message ===== */
+.user-msg {
+  margin: 20px 0 8px;
+  padding: 12px 16px;
+  background: var(--user-bg);
+  border-radius: var(--radius);
+  font-size: 15px; line-height: 1.6;
+  color: var(--text);
+  animation: fadeUp .2s ease;
+}
+@keyframes fadeUp { from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)} }
+
+/* ===== Assistant Text ===== */
+.assistant-text {
+  margin: 12px 0;
+  font-size: 15px; line-height: 1.7;
+  color: var(--text);
+  animation: fadeUp .2s ease;
+}
+.assistant-text p { margin: 8px 0; }
+.assistant-text h1,.assistant-text h2,.assistant-text h3 { margin: 16px 0 8px; font-weight: 600; color: var(--text); }
+.assistant-text h1{font-size:1.25em} .assistant-text h2{font-size:1.12em} .assistant-text h3{font-size:1.05em}
+.assistant-text ul,.assistant-text ol { margin: 8px 0 8px 24px; }
+.assistant-text li { margin: 4px 0; }
+.assistant-text a { color: var(--user-accent); text-decoration: none; }
+.assistant-text a:hover { text-decoration: underline; }
+.assistant-text code {
+  background: var(--code-bg); border: 1px solid var(--border);
+  padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: .88em;
+}
+.assistant-text pre {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 14px; margin: 10px 0;
+  overflow-x: auto;
+}
+.assistant-text pre code {
+  background: none; border: none; padding: 0;
+  font-size: 13px; line-height: 1.55;
+}
+.assistant-text blockquote {
+  border-left: 3px solid var(--accent); padding-left: 14px;
+  margin: 10px 0; color: var(--text-secondary);
+}
+.assistant-text table { border-collapse: collapse; margin: 10px 0; width: 100%; font-size: 14px; }
+.assistant-text th,.assistant-text td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+.assistant-text th { background: var(--bg-hover); font-weight: 600; }
+.assistant-text hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+/* ===== Thinking ===== */
+.thinking {
+  margin: 8px 0; border-radius: var(--radius-sm);
+  overflow: hidden; animation: fadeUp .2s ease;
+}
+.thinking-toggle {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; cursor: pointer; user-select: none;
+  color: var(--text-muted); font-size: 13px;
+}
+.thinking-toggle:hover { color: var(--text-secondary); }
+.thinking-chevron {
+  width: 16px; height: 16px; transition: transform .2s;
+  display: flex; align-items: center; justify-content: center;
+}
+.thinking.open .thinking-chevron { transform: rotate(90deg); }
+.thinking-content {
+  display: none; padding: 8px 0 8px 24px;
+  font-size: 13px; color: var(--text-muted); line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 300px; overflow-y: auto;
+}
+.thinking.open .thinking-content { display: block; }
+
+/* ===== Step Group (tool calls) ===== */
+.step-group { margin: 12px 0; animation: fadeUp .2s ease; }
+.step-group-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; cursor: pointer; user-select: none;
+  color: var(--text-muted); font-size: 14px; font-weight: 500;
+}
+.step-group-header:hover { color: var(--text-secondary); }
+.step-chevron {
+  width: 18px; height: 18px; transition: transform .2s;
+  display: flex; align-items: center; justify-content: center;
+}
+.step-group.open .step-chevron { transform: rotate(90deg); }
+.step-list { display: none; padding: 4px 0 4px 8px; }
+.step-group.open .step-list { display: block; }
+
+/* ===== Step Item (single tool call) ===== */
+.step-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 8px 8px 0; min-height: 42px;
+  position: relative; cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background .1s;
+}
+.step-item:hover { background: var(--bg-hover); }
+/* timeline line */
+.step-item::before {
+  content: ''; position: absolute;
+  left: 15px; top: 0; bottom: 0; width: 1.5px;
+  background: var(--timeline);
+}
+.step-item:first-child::before { top: 50%; }
+.step-item:last-child::before { bottom: 50%; }
+.step-item:only-child::before { display: none; }
+
+.step-icon {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--bg); border: 1.5px solid var(--timeline);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; z-index: 1; font-size: 14px; color: var(--text-secondary);
+}
+.step-name {
+  font-weight: 600; font-size: 14px; color: var(--text);
+  white-space: nowrap; flex-shrink: 0;
+}
+.step-desc {
+  flex: 1; min-width: 0;
+  font-size: 13px; color: var(--text-muted);
+  font-family: var(--mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.step-duration {
+  font-size: 12px; color: var(--text-muted);
+  white-space: nowrap; flex-shrink: 0;
+}
+.step-arrow {
+  color: var(--text-muted); flex-shrink: 0;
+  font-size: 14px; opacity: .5;
+}
+
+/* Step detail (expanded result) */
+.step-detail {
+  display: none; margin: 0 0 8px 42px;
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); overflow: hidden;
+  animation: fadeUp .15s ease;
+}
+.step-detail.open { display: block; }
+.step-detail pre {
+  margin: 0; padding: 12px; font-size: 12px;
+  font-family: var(--mono); line-height: 1.5;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  max-height: 300px; overflow-y: auto;
+  color: var(--text-secondary);
+}
+.step-detail.error pre { color: var(--error); }
+.step-detail .detail-input {
+  padding: 10px 12px; font-size: 12px; font-family: var(--mono);
+  color: var(--text-secondary); border-bottom: 1px solid var(--border);
+  white-space: pre-wrap; word-break: break-word;
+}
+.step-detail .detail-result {
+  padding: 10px 12px; font-size: 12px; font-family: var(--mono);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 250px; overflow-y: auto;
+}
+
+/* Token count */
+.token-count {
+  font-size: 12px; color: var(--accent);
+  padding: 2px 0 4px;
+  opacity: .8;
+}
+
+/* Copy button */
+.copy-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border: none; background: none;
+  color: var(--text-muted); cursor: pointer; border-radius: 6px;
+  transition: all .15s; margin: 2px 0;
+}
+.copy-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
+
+/* ===== Input Area ===== */
+#input-area {
+  flex-shrink: 0; padding: 10px 16px 12px;
+  background: var(--bg); border-top: 1px solid var(--border);
+}
+#input-row {
+  max-width: 720px; margin: 0 auto;
+  display: flex; align-items: center; gap: 10px;
+}
+.input-pill {
+  flex: 1; display: flex; align-items: center; gap: 8px;
+  background: var(--bg-white); border: 1px solid var(--border);
+  border-radius: 24px; padding: 0 6px 0 16px;
+  transition: border-color .15s;
+}
+.input-pill:focus-within { border-color: var(--accent); }
+.input-pill svg { flex-shrink: 0; color: var(--accent); opacity: .6; }
+#input {
+  flex: 1; border: none; background: none; outline: none;
+  font-size: 15px; font-family: inherit; color: var(--text);
+  padding: 10px 0; line-height: 1.4;
+  resize: none; max-height: 120px;
+}
+#input::placeholder { color: var(--text-muted); }
+#btn-send {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--accent-light); border: 1px solid var(--border);
+  color: var(--accent); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .15s; flex-shrink: 0; margin: 2px;
+}
+#btn-send:hover { background: var(--accent); color: #fff; }
+#btn-scroll {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--bg-white); border: 1px solid var(--border);
+  color: var(--text-muted); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .15s; flex-shrink: 0;
+}
+#btn-scroll:hover { background: var(--bg-hover); color: var(--text); }
+
+/* ===== Terminal Panel ===== */
+#terminal-panel {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: #1a1a2e; z-index: 100;
+  border-top: 2px solid var(--accent);
+  transition: transform .3s ease;
+  height: 50vh;
+}
+#terminal-panel.hidden { transform: translateY(100%); pointer-events: none; }
+#terminal-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 12px; background: #111;
+  font-size: 12px; color: #aaa; font-weight: 600;
+  letter-spacing: .5px;
+}
+#terminal-bar button {
+  background: none; border: none; color: #888; cursor: pointer;
+  font-size: 18px; padding: 2px 6px; border-radius: 4px;
+}
+#terminal-bar button:hover { background: rgba(255,255,255,.1); color: #fff; }
+#terminal { height: calc(100% - 34px); }
+
+/* ===== Welcome ===== */
+.welcome {
+  text-align: center; padding: 80px 24px; color: var(--text-muted);
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.welcome svg { opacity: .2; }
+.welcome h2 { font-size: 18px; color: var(--text-secondary); font-weight: 500; }
+.welcome p { font-size: 14px; max-width: 360px; line-height: 1.6; }
+
+@media (max-width: 600px) {
+  #messages { padding: 12px 16px; }
+  .step-desc { max-width: 120px; }
+  #input { font-size: 16px; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="header-left">
+      <span class="status-dot starting" id="status-dot"></span>
+      <h1 id="title">Claude Remote</h1>
+    </div>
+    <div class="header-right">
+      <button class="hbtn" id="btn-terminal" title="Terminal">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="chat-area">
+    <div id="messages">
+      <div class="welcome" id="welcome">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+        <h2>Claude Remote Control</h2>
+        <p>Claude REPL is running. Send a message below to start.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="input-area">
+    <div id="input-row">
+      <div class="input-pill">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        <textarea id="input" placeholder="Reply..." rows="1"></textarea>
+        <button id="btn-send" title="Send">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </div>
+      <button id="btn-scroll" title="Scroll to bottom">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="terminal-panel" class="hidden">
+    <div id="terminal-bar">
+      <span>TERMINAL</span>
+      <button id="btn-close-terminal">&times;</button>
+    </div>
+    <div id="terminal"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+// ============================================================
+//  State
+// ============================================================
+const S = {
+  ws: null,
+  seenUuids: new Set(),
+  messageMap: new Map(),
+  toolMap: new Map(),       // tool_use id → { el, name, groupEl }
+  currentGroup: null,       // current step-group element
+  currentGroupCount: 0,
+  isAtBottom: true,
+  terminalOpen: false,
+  ptyBuffer: '',
+};
+
+const $ = id => document.getElementById(id);
+const $msgs = $('messages'), $chat = $('chat-area'), $input = $('input');
+const $welcome = $('welcome');
+
+// ============================================================
+//  Utilities
+// ============================================================
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function trunc(s, n) { return (!s || s.length <= n) ? s : s.substring(0, n) + '...'; }
+
+function renderMd(text) {
+  try {
+    const html = marked.parse(text, { breaks: true, gfm: true });
+    const d = document.createElement('div');
+    d.innerHTML = html;
+    d.querySelectorAll('pre code').forEach(el => { try { hljs.highlightElement(el); } catch {} });
+    return d.innerHTML;
+  } catch { return esc(text); }
+}
+
+function formatTokens(n) {
+  if (!n) return '';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k tokens';
+  return n + ' tokens';
+}
+
+// Auto-scroll
+$chat.addEventListener('scroll', () => {
+  S.isAtBottom = ($chat.scrollHeight - $chat.scrollTop - $chat.clientHeight) < 60;
+});
+function scrollEnd() {
+  if (S.isAtBottom) requestAnimationFrame(() => { $chat.scrollTop = $chat.scrollHeight; });
+}
+
+function removeWelcome() { if ($welcome && $welcome.parentNode) $welcome.remove(); }
+
+// ============================================================
+//  Tool Icons (SVG)
+// ============================================================
+const ICONS = {
+  Bash:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>',
+  Read:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
+  Edit:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+  Write:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+  Glob:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>',
+  Grep:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>',
+  WebFetch:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+  WebSearch:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+  Task:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+};
+function iconFor(name) { return ICONS[name] || ICONS.Bash; }
+
+function toolDesc(name, input) {
+  if (!input) return '';
+  switch (name) {
+    case 'Bash': return input.description || input.command || '';
+    case 'Read': return input.file_path || '';
+    case 'Write': return input.file_path || '';
+    case 'Edit': return input.file_path || '';
+    case 'Glob': return input.pattern || '';
+    case 'Grep': return input.pattern || '';
+    case 'WebFetch': return input.url || '';
+    case 'WebSearch': return input.query || '';
+    case 'Task': return input.description || input.prompt || '';
+    default: return JSON.stringify(input).substring(0, 80);
+  }
+}
+
+function toolInputFull(name, input) {
+  if (!input) return '';
+  switch (name) {
+    case 'Bash': return input.command || '';
+    case 'Read': return input.file_path || '';
+    case 'Write': return `${input.file_path || ''}\n${'─'.repeat(30)}\n${trunc(input.content, 800)}`;
+    case 'Edit': {
+      let s = (input.file_path || '') + '\n';
+      if (input.old_string !== undefined) s += `- ${trunc(input.old_string, 300)}\n+ ${trunc(input.new_string, 300)}`;
+      return s;
+    }
+    case 'Glob': return `pattern: ${input.pattern}${input.path ? '\npath: ' + input.path : ''}`;
+    case 'Grep': return `pattern: ${input.pattern}${input.path ? '\npath: ' + input.path : ''}`;
+    case 'WebFetch': return `${input.url}\n${input.prompt || ''}`;
+    case 'WebSearch': return input.query || '';
+    case 'Task': return `[${input.subagent_type || 'agent'}] ${input.description || ''}\n${trunc(input.prompt, 300)}`;
+    default: return JSON.stringify(input, null, 2);
+  }
+}
+
+// ============================================================
+//  Rendering — step group management
+// ============================================================
+function closeGroup() {
+  if (S.currentGroup) {
+    S.currentGroup.querySelector('.step-count').textContent = S.currentGroupCount + ' steps';
+    S.currentGroup = null;
+    S.currentGroupCount = 0;
+  }
+}
+
+function ensureGroup() {
+  if (!S.currentGroup) {
+    const g = document.createElement('div');
+    g.className = 'step-group open';
+    g.innerHTML = `
+      <div class="step-group-header" onclick="this.parentElement.classList.toggle('open')">
+        <span class="step-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg></span>
+        <span class="step-count">steps</span>
+      </div>
+      <div class="step-list"></div>
+    `;
+    $msgs.appendChild(g);
+    S.currentGroup = g;
+    S.currentGroupCount = 0;
+  }
+  return S.currentGroup.querySelector('.step-list');
+}
+
+// ============================================================
+//  Event Processing
+// ============================================================
+function processEvent(evt) {
+  if (S.seenUuids.has(evt.uuid)) return;
+  if (evt.uuid) S.seenUuids.add(evt.uuid);
+  removeWelcome();
+
+  if (evt.type === 'user' && evt.message) renderUser(evt);
+  else if (evt.type === 'assistant' && evt.message) renderAssistant(evt);
+  scrollEnd();
+}
+
+// --- User ---
+function renderUser(evt) {
+  const c = evt.message.content;
+  if (Array.isArray(c)) {
+    for (const b of c) { if (b.type === 'tool_result') attachResult(b); }
+    return;
+  }
+  if (typeof c === 'string' && c.trim()) {
+    closeGroup();
+    const opt = $msgs.querySelector('[data-optimistic]');
+    if (opt) { opt.removeAttribute('data-optimistic'); return; }
+    const el = document.createElement('div');
+    el.className = 'user-msg';
+    el.innerHTML = renderMd(c);
+    $msgs.appendChild(el);
+  }
+}
+
+// --- Assistant ---
+function renderAssistant(evt) {
+  const blocks = evt.message.content || [];
+  const msgId = evt.message.id;
+  const usage = evt.message.usage;
+
+  for (const b of blocks) {
+    if (b.type === 'thinking' && b.thinking) renderThinking(b);
+    else if (b.type === 'text' && b.text) { closeGroup(); renderText(b.text, msgId); }
+    else if (b.type === 'tool_use') renderTool(b);
+  }
+
+  // Show token count when turn ends
+  if (usage && evt.message.stop_reason) {
+    const total = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) +
+                  (usage.cache_creation_input_tokens || 0) + (usage.output_tokens || 0);
+    if (total > 0 && S.currentGroup) {
+      let tc = S.currentGroup.querySelector('.token-count');
+      if (!tc) {
+        tc = document.createElement('div');
+        tc.className = 'token-count';
+        S.currentGroup.appendChild(tc);
+      }
+      tc.textContent = formatTokens(total);
+    }
+  }
+}
+
+function renderText(text, msgId) {
+  let el = S.messageMap.get(msgId);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'assistant-text';
+    S.messageMap.set(msgId, el);
+    $msgs.appendChild(el);
+  }
+  const d = document.createElement('div');
+  d.innerHTML = renderMd(text);
+  el.appendChild(d);
+}
+
+function renderThinking(b) {
+  closeGroup();
+  const el = document.createElement('div');
+  el.className = 'thinking';
+  const preview = trunc(b.thinking.replace(/\n/g, ' '), 60);
+  el.innerHTML = `
+    <div class="thinking-toggle" onclick="this.parentElement.classList.toggle('open')">
+      <span class="thinking-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg></span>
+      <span>Thinking</span>
+      <span style="color:var(--text-muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${esc(preview)}</span>
+    </div>
+    <div class="thinking-content">${esc(b.thinking)}</div>
+  `;
+  $msgs.appendChild(el);
+}
+
+function renderTool(b) {
+  const list = ensureGroup();
+  S.currentGroupCount++;
+  S.currentGroup.querySelector('.step-count').textContent = S.currentGroupCount + ' steps';
+
+  const desc = toolDesc(b.name, b.input);
+  const item = document.createElement('div');
+  item.className = 'step-item';
+  item.innerHTML = `
+    <div class="step-icon">${iconFor(b.name)}</div>
+    <span class="step-name">${esc(b.name)}</span>
+    <span class="step-desc">${esc(trunc(desc, 40))}</span>
+    <span class="step-duration" id="dur-${b.id}"></span>
+    <span class="step-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg></span>
+  `;
+
+  // Detail panel (hidden)
+  const detail = document.createElement('div');
+  detail.className = 'step-detail';
+  detail.id = `detail-${b.id}`;
+  const inputFull = toolInputFull(b.name, b.input);
+  detail.innerHTML = `
+    <div class="detail-input">${esc(inputFull)}</div>
+    <div class="detail-result" id="result-${b.id}"></div>
+  `;
+
+  item.addEventListener('click', () => detail.classList.toggle('open'));
+  list.appendChild(item);
+  list.appendChild(detail);
+
+  S.toolMap.set(b.id, { item, detail, name: b.name, group: S.currentGroup });
+}
+
+function attachResult(b) {
+  const info = S.toolMap.get(b.tool_use_id);
+  if (!info) return;
+
+  const isErr = b.is_error === true;
+  if (isErr) info.detail.classList.add('error');
+
+  let text = '';
+  if (typeof b.content === 'string') text = b.content;
+  else if (Array.isArray(b.content)) text = b.content.map(c => c.text || JSON.stringify(c)).join('\n');
+
+  const resultEl = info.detail.querySelector('.detail-result');
+  if (resultEl) {
+    resultEl.textContent = trunc(text, 3000);
+    if (isErr) resultEl.style.color = 'var(--error)';
+  }
+
+  // Show duration from toolUseResult if available
+  // (will be set by the system event; for now leave blank)
+}
+
+// ============================================================
+//  Terminal
+// ============================================================
+let term = null, fitAddon = null;
+function initTerm() {
+  if (term) return;
+  term = new Terminal({
+    theme: { background: '#0f0f23', foreground: '#e8e6f3', cursor: '#a78bfa', selectionBackground: 'rgba(167,139,250,.3)' },
+    fontFamily: "'Cascadia Code','Fira Code','JetBrains Mono',monospace",
+    fontSize: 13, cursorBlink: true, scrollback: 5000,
+  });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open($('terminal'));
+  fitAddon.fit();
+  if (S.ptyBuffer) { term.write(S.ptyBuffer); S.ptyBuffer = ''; }
+  term.onData(d => { if (S.ws?.readyState === WebSocket.OPEN) S.ws.send(JSON.stringify({ type: 'input', data: d })); });
+  new ResizeObserver(() => {
+    if (fitAddon && S.terminalOpen) {
+      try { fitAddon.fit(); S.ws?.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })); } catch {}
+    }
+  }).observe($('terminal'));
+}
+
+$('btn-terminal').addEventListener('click', () => {
+  S.terminalOpen = !S.terminalOpen;
+  $('terminal-panel').classList.toggle('hidden', !S.terminalOpen);
+  $('btn-terminal').classList.toggle('active', S.terminalOpen);
+  if (S.terminalOpen) { if (!term) initTerm(); setTimeout(() => fitAddon?.fit(), 150); }
+});
+$('btn-close-terminal').addEventListener('click', () => {
+  S.terminalOpen = false;
+  $('terminal-panel').classList.add('hidden');
+  $('btn-terminal').classList.remove('active');
+});
+
+// ============================================================
+//  Input
+// ============================================================
+$input.addEventListener('input', () => {
+  $input.style.height = 'auto';
+  $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
+});
+$input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('btn-send').addEventListener('click', send);
+$('btn-scroll').addEventListener('click', () => { $chat.scrollTop = $chat.scrollHeight; });
+
+function send() {
+  const t = $input.value.trim();
+  if (!t || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  removeWelcome(); closeGroup();
+  const el = document.createElement('div');
+  el.className = 'user-msg'; el.dataset.optimistic = '1';
+  el.innerHTML = renderMd(t);
+  $msgs.appendChild(el);
+  S.isAtBottom = true; scrollEnd();
+  S.ws.send(JSON.stringify({ type: 'chat', text: t }));
+  $input.value = ''; $input.style.height = 'auto';
+}
+
+// ============================================================
+//  WebSocket
+// ============================================================
+function connect() {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+  S.ws = ws;
+  ws.onopen = () => setStatus('connected');
+  ws.onmessage = e => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'pty_output') { term ? term.write(m.data) : (S.ptyBuffer += m.data); }
+    else if (m.type === 'log_event') processEvent(m.event);
+    else if (m.type === 'transcript_ready') { setStatus('connected'); $('title').textContent = `Session ${m.sessionId.substring(0,8)}`; }
+    else if (m.type === 'status') setStatus(m.status === 'running' ? 'connected' : 'starting');
+    else if (m.type === 'pty_exit') setStatus('disconnected');
+  };
+  ws.onclose = () => { setStatus('disconnected'); setTimeout(connect, 2000); };
+  ws.onerror = () => {};
+}
+
+function setStatus(s) {
+  $('status-dot').className = 'status-dot ' + s;
+}
+
+connect();
+</script>
+</body>
+</html>
