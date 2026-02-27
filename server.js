@@ -19,6 +19,8 @@ let eventBuffer = [];
 let tailTimer = null;
 let discoveryTimer = null;
 let preExistingFiles = new Set();
+let preExistingFileSizes = new Map();
+let tailRemainder = Buffer.alloc(0);
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 
 // --- Permission approval state ---
@@ -26,6 +28,7 @@ let approvalSeq = 0;
 const pendingApprovals = new Map();  // id → { res, timer }
 let currentMode = 'default';
 let approvalMode = 'default';  // 'default' | 'partial' | 'all'
+const ALWAYS_AUTO_ALLOW = new Set(['TaskCreate', 'TaskUpdate']);
 const PARTIAL_AUTO_ALLOW = new Set(['Read', 'Glob', 'Grep', 'Write', 'Edit']);
 
 // --- Logging → file only (never pollute the terminal) ---
@@ -67,6 +70,13 @@ const server = http.createServer((req, res) => {
       if (data.permission_mode && data.permission_mode !== currentMode) {
         currentMode = data.permission_mode;
         broadcast({ type: 'mode', mode: currentMode });
+      }
+
+      if (ALWAYS_AUTO_ALLOW.has(data.tool_name)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'allow' }));
+        log(`Permission auto-allowed (always): ${data.tool_name}`);
+        return;
       }
 
       // Auto-approve based on approvalMode setting
@@ -372,14 +382,71 @@ function getProjectSlug(cwd) {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
+function hasConversationEvent(evt) {
+  if (!evt || typeof evt !== 'object') return false;
+  if (evt.type === 'user' || evt.type === 'assistant') return true;
+  const role = evt.message && typeof evt.message === 'object' ? evt.message.role : null;
+  return role === 'user' || role === 'assistant';
+}
+
+function fileLooksLikeTranscript(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size <= 0) return false;
+
+    const readSize = Math.min(stat.size, 64 * 1024);
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(readSize);
+    fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
+    fs.closeSync(fd);
+
+    const lines = buf.toString('utf8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const evt = JSON.parse(line);
+        if (hasConversationEvent(evt)) return true;
+      } catch {
+        // ignore malformed lines at file tail
+      }
+    }
+  } catch {}
+  return false;
+}
+
+function attachTranscript(target, startOffset = 0) {
+  transcriptPath = target.full;
+  transcriptOffset = Math.max(0, startOffset);
+  tailRemainder = Buffer.alloc(0);
+  eventBuffer = [];
+
+  const sessionId = path.basename(transcriptPath, '.jsonl');
+  log(`Transcript attached: ${sessionId} (offset=${transcriptOffset})`);
+  broadcast({
+    type: 'transcript_ready',
+    transcript: transcriptPath,
+    sessionId,
+  });
+
+  if (discoveryTimer) {
+    clearInterval(discoveryTimer);
+    discoveryTimer = null;
+  }
+  startTailing();
+}
+
 function snapshotExistingFiles() {
   const slug = getProjectSlug(CWD);
   const projectDir = path.join(PROJECTS_DIR, slug);
   preExistingFiles.clear();
+  preExistingFileSizes.clear();
   try {
     if (fs.existsSync(projectDir)) {
       for (const f of fs.readdirSync(projectDir)) {
-        if (f.endsWith('.jsonl')) preExistingFiles.add(f);
+        if (!f.endsWith('.jsonl')) continue;
+        const full = path.join(projectDir, f);
+        const stat = fs.statSync(full);
+        preExistingFiles.add(f);
+        preExistingFileSizes.set(f, stat.size);
       }
     }
   } catch {}
@@ -395,37 +462,48 @@ function startDiscovery() {
     if (!fs.existsSync(projectDir)) return;
 
     try {
-      const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
-      const newFiles = files.filter(f => !preExistingFiles.has(f));
-
-      if (newFiles.length > 0) {
-        const target = newFiles
-          .map(f => ({
+      const targets = fs.readdirSync(projectDir)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => {
+          const full = path.join(projectDir, f);
+          const stat = fs.statSync(full);
+          return {
             name: f,
-            full: path.join(projectDir, f),
-            mtime: fs.statSync(path.join(projectDir, f)).mtimeMs,
-          }))
-          .sort((a, b) => b.mtime - a.mtime)[0];
+            full,
+            mtime: stat.mtimeMs,
+            size: stat.size,
+          };
+        })
+        .sort((a, b) => b.mtime - a.mtime);
 
-        transcriptPath = target.full;
-        transcriptOffset = 0;
-        eventBuffer = [];
-        const sessionId = path.basename(transcriptPath, '.jsonl');
-        log(`NEW transcript found: ${sessionId}`);
-        broadcast({
-          type: 'transcript_ready',
-          transcript: transcriptPath,
-          sessionId,
-        });
-        clearInterval(discoveryTimer);
-        discoveryTimer = null;
-        startTailing();
+      const newTargets = targets.filter(t => !preExistingFiles.has(t.name));
+      const newTranscript = newTargets.find(t => fileLooksLikeTranscript(t.full));
+      if (newTranscript) {
+        log(`NEW transcript found: ${path.basename(newTranscript.full, '.jsonl')}`);
+        attachTranscript(newTranscript, 0);
+        return;
+      }
+
+      for (const t of newTargets) {
+        preExistingFiles.add(t.name);
+        preExistingFileSizes.set(t.name, t.size);
+      }
+
+      // Fallback: reuse a pre-existing transcript if it keeps growing.
+      const grownTargets = targets.filter(t => t.size > (preExistingFileSizes.get(t.name) || 0));
+      const grownTranscript = grownTargets.find(t => fileLooksLikeTranscript(t.full));
+      if (grownTranscript) {
+        const baseOffset = preExistingFileSizes.get(grownTranscript.name) || 0;
+        log(`Reusing growing transcript: ${path.basename(grownTranscript.full, '.jsonl')} (from offset ${baseOffset})`);
+        attachTranscript(grownTranscript, baseOffset);
+        return;
       }
     } catch {}
   }, 500);
 }
 
 function startTailing() {
+  tailRemainder = Buffer.alloc(0);
   tailTimer = setInterval(() => {
     if (!transcriptPath) return;
     try {
@@ -438,9 +516,13 @@ function startTailing() {
       fs.closeSync(fd);
       transcriptOffset = stat.size;
 
-      const chunk = buf.toString('utf8');
-      const lines = chunk.split('\n').filter(Boolean);
-      for (const line of lines) {
+      const data = tailRemainder.length > 0 ? Buffer.concat([tailRemainder, buf]) : buf;
+      let start = 0;
+      for (let i = 0; i < data.length; i++) {
+        if (data[i] !== 0x0A) continue; // '\n'
+        const line = data.slice(start, i).toString('utf8').trim();
+        start = i + 1;
+        if (!line) continue;
         try {
           const event = JSON.parse(line);
           eventBuffer.push(event);
@@ -449,6 +531,7 @@ function startTailing() {
           // skip malformed lines
         }
       }
+      tailRemainder = data.slice(start);
     } catch {
       // file might be temporarily locked
     }
@@ -458,6 +541,7 @@ function startTailing() {
 function stopTailing() {
   if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
   if (discoveryTimer) { clearInterval(discoveryTimer); discoveryTimer = null; }
+  tailRemainder = Buffer.alloc(0);
 }
 
 // ============================================================

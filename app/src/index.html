@@ -74,6 +74,22 @@
     </div>
   </div>
 
+  <!-- Todo Panel (above input, extends from chat box) -->
+  <div id="todo-panel">
+    <div id="todo-header" onclick="toggleTodoPanel()">
+      <div class="todo-header-left">
+        <svg class="todo-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>
+        <span class="todo-title">Tasks</span>
+        <span class="todo-badge" id="todo-badge">0</span>
+      </div>
+      <div class="todo-progress-mini" id="todo-progress-mini">
+        <div class="todo-progress-bar" id="todo-progress-bar"></div>
+      </div>
+      <span class="todo-summary" id="todo-summary"></span>
+    </div>
+    <div id="todo-list"></div>
+  </div>
+
   <div id="input-area">
     <div id="cmd-menu"></div>
     <div id="input-row">

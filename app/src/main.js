@@ -373,7 +373,12 @@ function processEvent(evt) {
 function renderUser(evt) {
   const c = evt.message.content;
   if (Array.isArray(c)) {
-    for (const b of c) { if (b.type === 'tool_result') attachResult(b); }
+    for (const b of c) {
+      if (b.type === 'tool_result') {
+        handleTodoToolResult(b, evt);
+        attachResult(b);
+      }
+    }
     return;
   }
   if (typeof c === 'string' && c.trim()) {
@@ -415,6 +420,8 @@ function renderCompactSummary(evt) {
   $msgs.appendChild(el);
 }
 
+const HIDDEN_STEP_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'AskUserQuestion', 'ExitPlanMode']);
+
 // --- Assistant ---
 function renderAssistant(evt) {
   const blocks = evt.message.content || [];
@@ -431,11 +438,16 @@ function renderAssistant(evt) {
       if (b.type === 'thinking' && b.thinking) renderThinking(b);
       else if (b.type === 'text' && b.text) { closeGroup(); renderText(b.text, msgId); }
       else if (b.type === 'tool_use') {
-        if (b.name === 'AskUserQuestion' && b.input && b.input.questions) {
+        const toolName = b.name || '';
+        // Todo tools — intercept for panel state
+        if (isTodoTool(toolName)) {
+          handleTodoToolUse(b);
+        }
+        if (toolName === 'AskUserQuestion' && b.input && b.input.questions) {
           if (!S.replaying) showQuestion(b.input.questions);
-        } else if (b.name === 'ExitPlanMode') {
+        } else if (toolName === 'ExitPlanMode') {
           if (!S.replaying) showPlanApproval(b.input);
-        } else {
+        } else if (!HIDDEN_STEP_TOOLS.has(toolName)) {
           renderTool(b);
         }
       }
@@ -761,6 +773,7 @@ function resetAppState() {
   S.pendingPerms = [];
   S.replaying = true;
   S.intentionalDisconnect = false;
+  resetTodoState();
   // Reset UI — use id="welcome" so getWelcome() can find it
   $msgs.innerHTML = `<div class="welcome" id="welcome">
     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
@@ -1108,6 +1121,211 @@ $('plan-other-btn').addEventListener('click', sendPlanOther);
 $('plan-other-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); sendPlanOther(); }
 });
+
+// ============================================================
+//  Todo Panel — state management + rendering
+// ============================================================
+const todoState = {
+  tasks: new Map(),       // taskId -> { subject, description, status, activeForm, blockedBy, blocks }
+  pendingCreates: new Map(), // tool_use_id -> input (waiting for tool_result to get taskId)
+  panelOpen: false,
+};
+
+function handleTodoToolUse(b) {
+  const { name, id, input } = b;
+  if (name === 'TaskCreate') {
+    // Claude's task panel starts a fresh batch after all tasks are done.
+    const hasOpenTasks = Array.from(todoState.tasks.values()).some(t => t.status !== 'completed');
+    if (todoState.tasks.size > 0 && !hasOpenTasks) {
+      todoState.tasks.clear();
+      renderTodoPanel();
+    }
+    todoState.pendingCreates.set(id, input);
+  } else if (name === 'TaskUpdate' && input.taskId) {
+    const task = todoState.tasks.get(input.taskId);
+    if (task) {
+      if (input.status) task.status = input.status;
+      if (input.subject) task.subject = input.subject;
+      if (input.description) task.description = input.description;
+      if (input.activeForm) task.activeForm = input.activeForm;
+      renderTodoPanel();
+    }
+  }
+}
+
+function handleTodoToolResult(b, evt) {
+  const { tool_use_id, content } = b;
+  const text = typeof content === 'string' ? content :
+    Array.isArray(content) ? content.map(c => c.text || '').join('') : '';
+  const toolUseResult = (evt && typeof evt.toolUseResult === 'object' && evt.toolUseResult) ? evt.toolUseResult : null;
+
+  // TaskCreate result: "Task #1 created successfully: subject"
+  const createInput = todoState.pendingCreates.get(tool_use_id);
+  if (createInput) {
+    todoState.pendingCreates.delete(tool_use_id);
+    const metaTaskId = toolUseResult?.task?.id;
+    const m = text.match(/Task #(\d+) created/i);
+    const taskId = metaTaskId ? String(metaTaskId) : (m ? m[1] : '');
+    if (taskId) {
+      const metaSubject = toolUseResult?.task?.subject;
+      todoState.tasks.set(taskId, {
+        subject: metaSubject || createInput.subject || '',
+        description: createInput.description || '',
+        status: 'pending',
+        activeForm: createInput.activeForm || '',
+        blockedBy: [],
+        blocks: [],
+      });
+      renderTodoPanel();
+    }
+    return;
+  }
+
+  if (toolUseResult?.taskId) {
+    const taskId = String(toolUseResult.taskId);
+    let task = todoState.tasks.get(taskId);
+    if (!task) {
+      task = {
+        subject: `Task #${taskId}`,
+        description: '',
+        status: 'pending',
+        activeForm: '',
+        blockedBy: [],
+        blocks: [],
+      };
+      todoState.tasks.set(taskId, task);
+    }
+    if (toolUseResult.statusChange?.to) {
+      task.status = toolUseResult.statusChange.to;
+    }
+    renderTodoPanel();
+    return;
+  }
+
+  // TaskList result: parse task listing
+  if (text.includes('Task #') && (text.includes('[pending]') || text.includes('[in_progress]') || text.includes('[completed]'))) {
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const tm = line.match(/#(\d+)\.\s*\[(\w+)]\s*(.*)/);
+      if (tm) {
+        const [, taskId, status, subject] = tm;
+        const existing = todoState.tasks.get(taskId);
+        if (existing) {
+          existing.status = status;
+          if (subject.trim()) existing.subject = subject.trim();
+        } else {
+          todoState.tasks.set(taskId, {
+            subject: subject.trim(),
+            description: '',
+            status,
+            activeForm: '',
+            blockedBy: [],
+            blocks: [],
+          });
+        }
+      }
+    }
+    renderTodoPanel();
+    return;
+  }
+
+  // TaskUpdate result: "Updated task #1 status"
+  const um = text.match(/Updated task #(\d+)/i);
+  if (um) {
+    renderTodoPanel();
+  }
+}
+
+function isTodoTool(name) {
+  return name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TaskList' || name === 'TaskGet';
+}
+
+function renderTodoPanel() {
+  const panel = $('todo-panel');
+  const list = $('todo-list');
+  const tasks = Array.from(todoState.tasks.entries()).sort(([aId], [bId]) => {
+    const aNum = Number.parseInt(aId, 10);
+    const bNum = Number.parseInt(bId, 10);
+    const aOk = Number.isFinite(aNum);
+    const bOk = Number.isFinite(bNum);
+    if (aOk && bOk) return aNum - bNum;
+    if (aOk) return -1;
+    if (bOk) return 1;
+    return String(aId).localeCompare(String(bId), undefined, { numeric: true });
+  });
+
+  if (tasks.length === 0) {
+    panel.classList.remove('has-tasks');
+    return;
+  }
+
+  panel.classList.add('has-tasks');
+
+  const total = tasks.length;
+  const completed = tasks.filter(([, t]) => t.status === 'completed').length;
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  // Update badge
+  const badge = $('todo-badge');
+  const remaining = total - completed;
+  badge.textContent = remaining > 0 ? remaining : '\u2713';
+  badge.classList.toggle('done', remaining === 0);
+
+  // Update progress bar
+  const bar = $('todo-progress-bar');
+  bar.style.width = pct + '%';
+  bar.classList.toggle('all-done', pct === 100);
+
+  // Update summary
+  $('todo-summary').textContent = `${completed}/${total}`;
+
+  // Render task list
+  const STATUS_ICON = {
+    pending: '\u25CB',
+    in_progress: '\u25D4',
+    completed: '\u2713',
+  };
+  const STATUS_LABEL = {
+    pending: 'Pending',
+    in_progress: 'Running',
+    completed: 'Done',
+  };
+
+  list.innerHTML = tasks.map(([id, t]) => {
+    const status = t.status || 'pending';
+    const showActive = status === 'in_progress' && t.activeForm;
+    return `<div class="todo-item ${status}">
+      <div class="todo-icon">${STATUS_ICON[status] || '\u25CB'}</div>
+      <div class="todo-body">
+        <div class="todo-subject">${esc(t.subject || 'Task #' + id)}</div>
+        ${showActive ? `<div class="todo-active-form">${esc(t.activeForm)}</div>` : ''}
+      </div>
+      <span class="todo-status-tag">${STATUS_LABEL[status] || status}</span>
+    </div>`;
+  }).join('');
+
+  // Auto-open on first task
+  if (!todoState.panelOpen && tasks.length > 0) {
+    todoState.panelOpen = true;
+    panel.classList.add('open');
+  }
+
+  scrollEnd();
+}
+
+function toggleTodoPanel() {
+  const panel = $('todo-panel');
+  todoState.panelOpen = !todoState.panelOpen;
+  panel.classList.toggle('open', todoState.panelOpen);
+}
+
+function resetTodoState() {
+  todoState.tasks.clear();
+  todoState.pendingCreates.clear();
+  todoState.panelOpen = false;
+  $('todo-panel').classList.remove('has-tasks', 'open');
+  $('todo-list').innerHTML = '';
+}
 
 // ============================================================
 //  Settings — approval mode
