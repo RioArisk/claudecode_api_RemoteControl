@@ -112,6 +112,8 @@ App 启动后输入 server 地址连接即可。
 
 - [x] 提问与计划远程弹窗（AskUserQuestion / ExitPlanMode 远程交互）
 - [x] 自动审批命令模式
+- [x] Claude Code ToDo App 渲染
 - [ ] 美化部分样式
-- [ ] 代码 diff 查看
+- [x] 代码 diff 查看
+- [ ] App 支持图片上传
 - [ ] /命令指令及样式美化
