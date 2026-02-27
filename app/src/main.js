@@ -110,12 +110,15 @@ const S = {
   model: '',
   mode: 'default',
   pendingPerms: [],
+  waitStartedAt: 0,
   replaying: true,           // true during history replay, false after replay_done
   reconnectTimer: null,
   intentionalDisconnect: false,
 };
 
 const $msgs = $('messages'), $chat = $('chat-area'), $input = $('input');
+const INPUT_PLACEHOLDER_DEFAULT = 'Reply...';
+const INPUT_PLACEHOLDER_WAITING = 'AI 思考中…';
 
 // ============================================================
 //  Utilities
@@ -171,6 +174,14 @@ function scrollEnd() {
 // ============================================================
 function setWaiting(on) {
   S.waiting = on;
+  if (on) {
+    S.waitStartedAt = Date.now();
+  } else {
+    S.waitStartedAt = 0;
+  }
+  $input.disabled = on;
+  $('btn-send').disabled = on;
+  $input.placeholder = on ? INPUT_PLACEHOLDER_WAITING : INPUT_PLACEHOLDER_DEFAULT;
   $('input-area').classList.toggle('waiting', on);
   if (on) {
     removeThinkingIndicator();
@@ -322,6 +333,24 @@ function isJunkContent(content) {
   return JUNK_PATTERNS.some(p => p.test(t));
 }
 
+function isAssistantTurnDone(evt) {
+  if (!evt || evt.type !== 'assistant' || !evt.message) return false;
+  const sr = evt.message.stop_reason;
+  if (!sr) return false;
+  // tool_use means Claude is still in the same turn (tool running / awaiting result).
+  return sr !== 'tool_use';
+}
+
+function isCurrentWaitingTurnEvent(evt) {
+  if (!S.waiting || !evt || evt.type !== 'assistant' || !evt.message) return false;
+
+  const ts = Date.parse(evt.timestamp || '');
+  if (Number.isFinite(ts) && S.waitStartedAt && ts < (S.waitStartedAt - 1500)) {
+    return false;
+  }
+  return true;
+}
+
 function processEvent(evt) {
   try {
     if (!evt) return;
@@ -357,15 +386,15 @@ function processEvent(evt) {
 
     if (evt.type === 'user' && evt.message) renderUser(evt);
     else if (evt.type === 'assistant' && evt.message) {
-      // ALWAYS clear thinking first, before any rendering that might throw
-      if (S.waiting) setWaiting(false);
+      const isCurrentTurn = isCurrentWaitingTurnEvent(evt);
+      // Keep input locked while assistant turn is active; only remove spinner on first valid reply chunk.
+      if (isCurrentTurn) removeThinkingIndicator();
       renderAssistant(evt);
+      if (isCurrentTurn && isAssistantTurnDone(evt)) setWaiting(false);
     }
     scrollEnd();
   } catch (e) {
     console.error('[processEvent]', e);
-    // Safety: always clear thinking even if rendering fails
-    if (S.waiting) setWaiting(false);
   }
 }
 
@@ -771,6 +800,7 @@ function resetAppState() {
   S.model = '';
   S.mode = 'default';
   S.pendingPerms = [];
+  S.waitStartedAt = 0;
   S.replaying = true;
   S.intentionalDisconnect = false;
   resetTodoState();
@@ -781,6 +811,9 @@ function resetAppState() {
     <p>Connected. Send a message below to start.</p>
   </div>`;
   $('input-area').classList.remove('waiting');
+  $input.disabled = false;
+  $('btn-send').disabled = false;
+  $input.placeholder = INPUT_PLACEHOLDER_DEFAULT;
   $input.value = '';
   updateSendBtn();
   updateHeaderInfo();
@@ -866,8 +899,6 @@ function connect() {
       }
     } catch (err) {
       console.error('[ws.onmessage]', err);
-      // Safety: clear thinking on any error
-      if (S.waiting && m.type === 'log_event') setWaiting(false);
     }
   };
 

@@ -653,13 +653,39 @@ header {
 
 /* ===== Input Disabled State ===== */
 #input-area.waiting .input-pill {
-  border-color: var(--border); background: var(--bg);
+  border-color: var(--border);
+  background: var(--bg);
+  position: relative;
+  overflow: hidden;
+}
+#input-area.waiting .input-pill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(45,138,110,.05) 40%,
+    rgba(45,138,110,.10) 50%,
+    rgba(45,138,110,.05) 60%,
+    transparent 100%
+  );
+  animation: inputShimmer 2s infinite ease-in-out;
+  pointer-events: none;
+  border-radius: inherit;
+}
+@keyframes inputShimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 #input-area.waiting #input {
   color: var(--text-muted); pointer-events: none;
 }
 #input-area.waiting #btn-send {
-  opacity: .4; pointer-events: none;
+  opacity: .3; pointer-events: none;
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text-muted);
 }
 #btn-send.empty {
   opacity: .35; pointer-events: none;
