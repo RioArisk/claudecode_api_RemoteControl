@@ -829,6 +829,8 @@ function connect() {
     setStatus('connected');
     setConnBanner(false);
     showApp();
+    // Sync approval mode to server
+    ws.send(JSON.stringify({ type: 'set_approval_mode', mode: approvalMode }));
   };
 
   ws.onmessage = e => {
@@ -845,6 +847,10 @@ function connect() {
       }
       else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
       else if (m.type === 'permission_request') showPermission(m);
+      else if (m.type === 'clear_permissions') {
+        S.pendingPerms = [];
+        $('perm-overlay').classList.remove('visible');
+      }
       else if (m.type === 'mode') {
         S.mode = m.mode; updateHeaderInfo();
       }
@@ -1104,6 +1110,91 @@ function sendPlanOther() {
 $('plan-other-btn').addEventListener('click', sendPlanOther);
 $('plan-other-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); sendPlanOther(); }
+});
+
+// ============================================================
+//  Settings — approval mode
+// ============================================================
+let approvalMode = localStorage.getItem('approvalMode') || 'default';
+let confirmResolve = null;
+
+function initSettings() {
+  const radio = document.querySelector(`input[name="approval-mode"][value="${approvalMode}"]`);
+  if (radio) radio.checked = true;
+  updateSettingsActive();
+}
+
+function updateSettingsActive() {
+  document.querySelectorAll('.settings-opt').forEach(el => {
+    el.classList.toggle('active', el.dataset.mode === approvalMode);
+  });
+}
+
+function openSettings() {
+  initSettings();
+  $('settings-overlay').classList.add('visible');
+}
+
+function closeSettings() {
+  $('settings-overlay').classList.remove('visible');
+}
+
+function setApprovalMode(mode) {
+  approvalMode = mode;
+  localStorage.setItem('approvalMode', mode);
+  updateSettingsActive();
+  if (S.ws && S.ws.readyState === WebSocket.OPEN) {
+    S.ws.send(JSON.stringify({ type: 'set_approval_mode', mode }));
+  }
+}
+
+function showConfirm(text) {
+  return new Promise(resolve => {
+    $('confirm-text').textContent = text;
+    $('confirm-overlay').classList.add('visible');
+    confirmResolve = resolve;
+  });
+}
+
+$('btn-settings').addEventListener('click', openSettings);
+$('settings-close').addEventListener('click', closeSettings);
+$('settings-overlay').addEventListener('click', e => {
+  if (e.target === $('settings-overlay')) closeSettings();
+});
+
+document.querySelectorAll('input[name="approval-mode"]').forEach(radio => {
+  radio.addEventListener('change', async (e) => {
+    const mode = e.target.value;
+    if (mode === 'all') {
+      const ok = await showConfirm(
+        'Full auto-approve will allow ALL commands (including Bash, system commands) without confirmation. This could be dangerous. Are you sure?'
+      );
+      if (!ok) {
+        const prev = document.querySelector(`input[name="approval-mode"][value="${approvalMode}"]`);
+        if (prev) prev.checked = true;
+        return;
+      }
+    } else if (mode === 'partial') {
+      const ok = await showConfirm(
+        'Partial auto-approve will automatically allow Read, Write, Edit, Glob, and Grep commands without confirmation. Continue?'
+      );
+      if (!ok) {
+        const prev = document.querySelector(`input[name="approval-mode"][value="${approvalMode}"]`);
+        if (prev) prev.checked = true;
+        return;
+      }
+    }
+    setApprovalMode(mode);
+  });
+});
+
+$('confirm-ok').addEventListener('click', () => {
+  $('confirm-overlay').classList.remove('visible');
+  if (confirmResolve) { confirmResolve(true); confirmResolve = null; }
+});
+$('confirm-cancel').addEventListener('click', () => {
+  $('confirm-overlay').classList.remove('visible');
+  if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
 });
 
 // ============================================================

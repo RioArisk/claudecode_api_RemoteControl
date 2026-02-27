@@ -25,6 +25,8 @@ const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 let approvalSeq = 0;
 const pendingApprovals = new Map();  // id → { res, timer }
 let currentMode = 'default';
+let approvalMode = 'default';  // 'default' | 'partial' | 'all'
+const PARTIAL_AUTO_ALLOW = new Set(['Read', 'Glob', 'Grep', 'Write', 'Edit']);
 
 // --- Logging → file only (never pollute the terminal) ---
 const LOG_FILE = path.join(__dirname, 'bridge.log');
@@ -65,6 +67,20 @@ const server = http.createServer((req, res) => {
       if (data.permission_mode && data.permission_mode !== currentMode) {
         currentMode = data.permission_mode;
         broadcast({ type: 'mode', mode: currentMode });
+      }
+
+      // Auto-approve based on approvalMode setting
+      if (approvalMode === 'all') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'allow' }));
+        log(`Permission auto-allowed (mode=all): ${data.tool_name}`);
+        return;
+      }
+      if (approvalMode === 'partial' && PARTIAL_AUTO_ALLOW.has(data.tool_name)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'allow' }));
+        log(`Permission auto-allowed (mode=partial): ${data.tool_name}`);
+        return;
       }
 
       // No WebUI clients → fall back to terminal prompt
@@ -178,6 +194,25 @@ wss.on('connection', (ws) => {
             reason: msg.reason || '',
           }));
           log(`Permission #${msg.id}: ${msg.decision}`);
+        }
+        break;
+      }
+      case 'set_approval_mode': {
+        const valid = ['default', 'partial', 'all'];
+        if (valid.includes(msg.mode)) {
+          approvalMode = msg.mode;
+          log(`Approval mode changed to: ${approvalMode}`);
+          // If switching to 'all' or 'partial', auto-resolve queued permissions
+          if (approvalMode === 'all') {
+            for (const [id, approval] of pendingApprovals) {
+              clearTimeout(approval.timer);
+              approval.res.writeHead(200, { 'Content-Type': 'application/json' });
+              approval.res.end(JSON.stringify({ decision: 'allow' }));
+              log(`Permission #${id}: auto-allowed (mode switched to all)`);
+            }
+            pendingApprovals.clear();
+            broadcast({ type: 'clear_permissions' });
+          }
         }
         break;
       }
