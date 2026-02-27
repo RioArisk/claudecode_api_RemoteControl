@@ -110,11 +110,7 @@ App 启动后输入 server 地址连接即可。
 
 > 本项目看到 Claude Code 官方远程控制，可惜不支持api调用的模式，于是空闲时间摸鱼用 vibing code 写的小东西，目前处于快速迭代阶段。
 
-- [ ] 深色模式
-- [ ] 多会话管理（同时连接多个 Claude 实例）
-- [ ] 文件预览（Read/Write/Edit 的 diff 可视化）
-- [ ] 消息搜索
-- [ ] 语音输入
-- [ ] iOS 适配
-- [ ] 更好的 token 用量统计面板
-- [ ] 连接密码 / 鉴权机制
+- [x] 提问与计划远程弹窗（AskUserQuestion / ExitPlanMode 远程交互）
+- [ ] 自动审批命令模式
+- [ ] 美化部分样式
+- [ ] 代码 diff 查看
