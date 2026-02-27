@@ -218,10 +218,7 @@ function updateHeaderInfo() {
   const model = formatModel(S.model);
   $('title').textContent = pathStr || 'Claude Remote';
   $('header-model').textContent = model;
-  updateModeButton();
 }
-
-function updateModeButton() {}
 
 // ============================================================
 //  Tool Icons (SVG)
@@ -385,7 +382,7 @@ function renderUser(evt) {
     if (opt) { opt.removeAttribute('data-optimistic'); return; }
     const el = document.createElement('div');
     el.className = 'user-msg';
-    el.innerHTML = renderMd(c);
+    el.innerHTML = esc(c).replace(/\n/g, '<br>');
     $msgs.appendChild(el);
   }
 }
@@ -791,7 +788,7 @@ function send() {
   removeWelcome(); closeGroup();
   const el = document.createElement('div');
   el.className = 'user-msg'; el.dataset.optimistic = '1';
-  el.innerHTML = renderMd(t);
+  el.innerHTML = esc(t).replace(/\n/g, '<br>');
   $msgs.appendChild(el);
   S.isAtBottom = true; scrollEnd();
   S.ws.send(JSON.stringify({ type: 'chat', text: t }));
