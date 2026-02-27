@@ -1167,7 +1167,7 @@ document.querySelectorAll('input[name="approval-mode"]').forEach(radio => {
     const mode = e.target.value;
     if (mode === 'all') {
       const ok = await showConfirm(
-        'Full auto-approve will allow ALL commands (including Bash, system commands) without confirmation. This could be dangerous. Are you sure?'
+        '全部自动审批将允许所有命令（包括 Bash、系统命令）无需确认直接执行，这可能存在风险。确定要开启吗？'
       );
       if (!ok) {
         const prev = document.querySelector(`input[name="approval-mode"][value="${approvalMode}"]`);
@@ -1176,7 +1176,7 @@ document.querySelectorAll('input[name="approval-mode"]').forEach(radio => {
       }
     } else if (mode === 'partial') {
       const ok = await showConfirm(
-        'Partial auto-approve will automatically allow Read, Write, Edit, Glob, and Grep commands without confirmation. Continue?'
+        '部分自动审批将自动放行 Read、Write、Edit、Glob、Grep 命令，无需手动确认。确定要开启吗？'
       );
       if (!ok) {
         const prev = document.querySelector(`input[name="approval-mode"][value="${approvalMode}"]`);
