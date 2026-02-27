@@ -137,6 +137,7 @@ wss.on('connection', (ws) => {
   for (const evt of eventBuffer) {
     ws.send(JSON.stringify({ type: 'log_event', event: evt }));
   }
+  ws.send(JSON.stringify({ type: 'replay_done' }));
 
   ws.on('message', (raw) => {
     let msg;

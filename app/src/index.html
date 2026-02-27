@@ -72,10 +72,6 @@
   <div id="input-area">
     <div id="cmd-menu"></div>
     <div id="input-row">
-      <button id="btn-mode" title="Switch mode (Shift+Tab)">
-        <span class="mode-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></span>
-        <span class="mode-label" id="mode-label">Default</span>
-      </button>
       <div class="input-pill">
         <textarea id="input" placeholder="Reply..." rows="1"></textarea>
         <button id="btn-send" title="Send">
@@ -112,6 +108,48 @@
       <div class="perm-actions">
         <button class="perm-btn-deny" id="perm-deny">Deny</button>
         <button class="perm-btn-allow" id="perm-allow">Allow</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Question Overlay (AskUserQuestion) -->
+  <div id="question-overlay">
+    <div id="question-dialog">
+      <div class="question-header">
+        <div class="question-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><circle cx="12" cy="17" r=".5"/></svg>
+        </div>
+        <div>
+          <div class="question-title" id="question-header-text">Question</div>
+          <div class="question-sub">Claude needs your input</div>
+        </div>
+      </div>
+      <div class="question-text" id="question-text"></div>
+      <div class="question-options" id="question-options"></div>
+      <div class="question-other-row">
+        <input class="question-other-input" id="question-other-input" type="text" placeholder="Other...">
+        <button class="question-other-btn" id="question-other-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Plan Approval Overlay (ExitPlanMode) -->
+  <div id="plan-overlay">
+    <div id="plan-dialog">
+      <div class="plan-header">
+        <div class="plan-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <div>
+          <div class="plan-title">Plan Ready</div>
+          <div class="plan-sub">Would you like to proceed?</div>
+        </div>
+      </div>
+      <div class="plan-content" id="plan-content"></div>
+      <div class="plan-options" id="plan-options"></div>
+      <div class="plan-other-row">
+        <input class="plan-other-input" id="plan-other-input" type="text" placeholder="Tell Claude what to change...">
+        <button class="plan-other-btn" id="plan-other-btn">Send</button>
       </div>
     </div>
   </div>

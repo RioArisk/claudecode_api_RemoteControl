@@ -425,36 +425,6 @@ header {
 }
 #btn-send:hover, #btn-send:active { background: var(--accent); color: #fff; }
 
-/* ===== Mode Toggle Button ===== */
-#btn-mode {
-  height: 36px; border: 1px solid var(--border); border-radius: 18px;
-  background: var(--bg-white); cursor: pointer;
-  display: flex; align-items: center; gap: 5px;
-  padding: 0 12px 0 10px; flex-shrink: 0;
-  transition: all .15s; font-family: inherit;
-  white-space: nowrap;
-}
-#btn-mode:hover { border-color: var(--text-muted); }
-#btn-mode:active { transform: scale(.96); }
-#btn-mode.switching { opacity: .5; pointer-events: none; }
-#btn-mode .mode-icon {
-  width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted); flex-shrink: 0;
-}
-#btn-mode .mode-label {
-  font-size: 12px; font-weight: 600; color: var(--text-secondary);
-  letter-spacing: .2px;
-}
-#btn-mode.plan { border-color: #e8a000; background: #fff3e0; }
-#btn-mode.plan .mode-label { color: #e8a000; }
-#btn-mode.plan .mode-icon { color: #e8a000; }
-#btn-mode.acceptEdits { border-color: var(--accent); background: var(--accent-light); }
-#btn-mode.acceptEdits .mode-label { color: var(--accent); }
-#btn-mode.acceptEdits .mode-icon { color: var(--accent); }
-#btn-mode.bypassPermissions { border-color: var(--error); background: var(--error-bg); }
-#btn-mode.bypassPermissions .mode-label { color: var(--error); }
-#btn-mode.bypassPermissions .mode-icon { color: var(--error); }
-
 /* ===== Welcome ===== */
 .welcome {
   text-align: center; padding: 60px 24px; color: var(--text-muted);
@@ -628,6 +598,129 @@ header {
   background: var(--accent); color: #fff;
 }
 .perm-btn-allow:hover, .perm-btn-allow:active { background: #247a5e; }
+
+/* ===== Question Overlay (AskUserQuestion) ===== */
+#question-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.35);
+  align-items: flex-end; justify-content: center;
+  animation: fadeIn .15s ease;
+}
+#question-overlay.visible { display: flex; }
+#question-dialog {
+  width: 100%; max-width: 480px;
+  background: var(--bg-white); border-radius: 16px 16px 0 0;
+  padding: 20px 20px calc(24px + env(safe-area-inset-bottom, 0px));
+  box-shadow: 0 -4px 24px rgba(0,0,0,.12);
+  animation: slideUp .2s ease;
+}
+.question-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.question-icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: var(--accent-light); color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.question-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.question-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.question-text {
+  font-size: 14px; color: var(--text); margin-bottom: 14px; line-height: 1.5;
+}
+.question-options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.question-opt {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px 14px; border-radius: var(--radius-sm);
+  background: var(--bg); border: 1px solid var(--border);
+  cursor: pointer; transition: all .15s; text-align: left;
+  font-family: inherit; font-size: 14px; color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+}
+.question-opt:active { transform: scale(.98); background: var(--accent-bg); border-color: var(--accent); }
+.question-opt-num {
+  width: 24px; height: 24px; border-radius: 50%;
+  background: var(--accent-light); color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; flex-shrink: 0;
+}
+.question-opt-body { min-width: 0; }
+.question-opt-label { font-weight: 600; }
+.question-opt-desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.question-other-row {
+  display: flex; gap: 8px;
+}
+.question-other-input {
+  flex: 1; padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); font-family: inherit;
+  font-size: 14px; color: var(--text); background: var(--bg-white);
+  outline: none;
+}
+.question-other-input:focus { border-color: var(--accent); }
+.question-other-btn {
+  padding: 10px 18px; border-radius: var(--radius-sm);
+  background: var(--accent); color: #fff; border: none;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  font-family: inherit;
+}
+.question-other-btn:active { background: #247a5e; }
+
+/* ===== Plan Approval Overlay (ExitPlanMode) ===== */
+#plan-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.35);
+  align-items: flex-end; justify-content: center;
+  animation: fadeIn .15s ease;
+}
+#plan-overlay.visible { display: flex; }
+#plan-dialog {
+  width: 100%; max-width: 480px;
+  background: var(--bg-white); border-radius: 16px 16px 0 0;
+  padding: 20px 20px calc(24px + env(safe-area-inset-bottom, 0px));
+  box-shadow: 0 -4px 24px rgba(0,0,0,.12);
+  animation: slideUp .2s ease;
+  max-height: 85vh; overflow-y: auto;
+}
+.plan-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.plan-icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: #e8f0fe; color: #1967d2;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.plan-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.plan-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.plan-content {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px;
+  font-size: 13px; color: var(--text-secondary);
+  max-height: 200px; overflow-y: auto; line-height: 1.6;
+}
+.plan-content h1,.plan-content h2,.plan-content h3 {
+  font-size: 14px; margin: 8px 0 4px; color: var(--text);
+}
+.plan-content p { margin: 4px 0; }
+.plan-content ul,.plan-content ol { padding-left: 18px; margin: 4px 0; }
+.plan-options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.plan-other-row {
+  display: flex; gap: 8px;
+}
+.plan-other-input {
+  flex: 1; padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); font-family: inherit;
+  font-size: 14px; color: var(--text); background: var(--bg-white);
+  outline: none;
+}
+.plan-other-input:focus { border-color: var(--accent); }
+.plan-other-btn {
+  padding: 10px 18px; border-radius: var(--radius-sm);
+  background: var(--accent); color: #fff; border: none;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  font-family: inherit;
+}
+.plan-other-btn:active { background: #247a5e; }
 
 /* ===== Slash Command Menu ===== */
 #cmd-menu {

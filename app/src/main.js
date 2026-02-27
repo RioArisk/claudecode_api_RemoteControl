@@ -110,6 +110,7 @@ const S = {
   model: '',
   mode: 'default',
   pendingPerms: [],
+  replaying: true,           // true during history replay, false after replay_done
   reconnectTimer: null,
   intentionalDisconnect: false,
 };
@@ -181,7 +182,6 @@ function setWaiting(on) {
     scrollEnd();
   } else {
     removeThinkingIndicator();
-    $input.focus();
   }
   updateSendBtn();
 }
@@ -221,13 +221,7 @@ function updateHeaderInfo() {
   updateModeButton();
 }
 
-function updateModeButton() {
-  const btn = $('btn-mode');
-  btn.className = '';
-  const labels = { default: 'Default', plan: 'Plan', acceptEdits: 'Accept Edits', bypassPermissions: 'Bypass' };
-  $('mode-label').textContent = labels[S.mode] || 'Default';
-  if (S.mode !== 'default') btn.classList.add(S.mode);
-}
+function updateModeButton() {}
 
 // ============================================================
 //  Tool Icons (SVG)
@@ -439,7 +433,15 @@ function renderAssistant(evt) {
     try {
       if (b.type === 'thinking' && b.thinking) renderThinking(b);
       else if (b.type === 'text' && b.text) { closeGroup(); renderText(b.text, msgId); }
-      else if (b.type === 'tool_use') renderTool(b);
+      else if (b.type === 'tool_use') {
+        if (b.name === 'AskUserQuestion' && b.input && b.input.questions) {
+          if (!S.replaying) showQuestion(b.input.questions);
+        } else if (b.name === 'ExitPlanMode') {
+          if (!S.replaying) showPlanApproval(b.input);
+        } else {
+          renderTool(b);
+        }
+      }
     } catch (e) {
       console.error('[renderBlock]', e);
     }
@@ -735,18 +737,6 @@ $input.addEventListener('keydown', e => {
 $('btn-send').addEventListener('click', send);
 $('btn-scroll').addEventListener('click', () => { $chat.scrollTop = $chat.scrollHeight; });
 
-// Mode toggle
-let modeSwitching = false;
-$('btn-mode').addEventListener('click', () => {
-  if (modeSwitching || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
-  modeSwitching = true;
-  $('btn-mode').classList.add('switching');
-  S.ws.send(JSON.stringify({ type: 'input', data: '\x1b[Z' }));
-  setTimeout(() => {
-    modeSwitching = false;
-    $('btn-mode').classList.remove('switching');
-  }, 800);
-});
 updateSendBtn();
 
 // Back button — disconnect and return to connect screen
@@ -772,6 +762,7 @@ function resetAppState() {
   S.model = '';
   S.mode = 'default';
   S.pendingPerms = [];
+  S.replaying = true;
   S.intentionalDisconnect = false;
   // Reset UI — use id="welcome" so getWelcome() can find it
   $msgs.innerHTML = `<div class="welcome" id="welcome">
@@ -847,6 +838,7 @@ function connect() {
       if (m.type === 'pty_output') { /* ignored — no terminal panel */ }
       else if (m.type === 'log_event') processEvent(m.event);
       else if (m.type === 'transcript_ready') { setStatus('connected'); }
+      else if (m.type === 'replay_done') { S.replaying = false; }
       else if (m.type === 'status') {
         setStatus(m.status === 'running' ? 'connected' : 'starting');
         if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
@@ -855,8 +847,6 @@ function connect() {
       else if (m.type === 'permission_request') showPermission(m);
       else if (m.type === 'mode') {
         S.mode = m.mode; updateHeaderInfo();
-        modeSwitching = false;
-        $('btn-mode').classList.remove('switching');
       }
     } catch (err) {
       console.error('[ws.onmessage]', err);
@@ -959,6 +949,162 @@ function resolvePermission(decision) {
 
 $('perm-allow').addEventListener('click', () => resolvePermission('allow'));
 $('perm-deny').addEventListener('click', () => resolvePermission('deny'));
+
+// ============================================================
+//  AskUserQuestion — interactive question overlay
+// ============================================================
+let questionQueue = [];
+let currentQuestions = null;
+let currentQuestionIdx = 0;
+
+function showQuestion(questions) {
+  questionQueue.push(questions);
+  if (questionQueue.length === 1) showNextQuestion();
+}
+
+function showNextQuestion() {
+  if (questionQueue.length === 0) {
+    $('question-overlay').classList.remove('visible');
+    currentQuestions = null;
+    return;
+  }
+  currentQuestions = questionQueue[0];
+  currentQuestionIdx = 0;
+  renderCurrentQuestion();
+}
+
+function renderCurrentQuestion() {
+  if (!currentQuestions || currentQuestionIdx >= currentQuestions.length) {
+    questionQueue.shift();
+    showNextQuestion();
+    return;
+  }
+  const q = currentQuestions[currentQuestionIdx];
+  $('question-header-text').textContent = q.header || 'Question';
+  $('question-text').textContent = q.question || '';
+
+  const optionsEl = $('question-options');
+  const options = q.options || [];
+  optionsEl.innerHTML = options.map((opt, i) => `
+    <button class="question-opt" data-idx="${i + 1}">
+      <span class="question-opt-num">${i + 1}</span>
+      <div class="question-opt-body">
+        <div class="question-opt-label">${esc(opt.label)}</div>
+        ${opt.description ? `<div class="question-opt-desc">${esc(opt.description)}</div>` : ''}
+      </div>
+    </button>
+  `).join('');
+
+  optionsEl.querySelectorAll('.question-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = btn.dataset.idx;
+      sendQuestionAnswer(idx);
+    });
+  });
+
+  $('question-other-input').value = '';
+  $('question-overlay').classList.add('visible');
+}
+
+function sendQuestionAnswer(numKey) {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  S.ws.send(JSON.stringify({ type: 'input', data: String(numKey) }));
+  $('question-overlay').classList.remove('visible');
+  currentQuestionIdx++;
+  if (currentQuestions && currentQuestionIdx < currentQuestions.length) {
+    setTimeout(renderCurrentQuestion, 500);
+  } else {
+    questionQueue.shift();
+    if (questionQueue.length > 0) setTimeout(showNextQuestion, 500);
+    else currentQuestions = null;
+  }
+}
+
+function sendQuestionOther() {
+  const text = $('question-other-input').value.trim();
+  if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  const options = currentQuestions?.[currentQuestionIdx]?.options || [];
+  const otherNum = String(options.length + 1);
+  S.ws.send(JSON.stringify({ type: 'input', data: otherNum }));
+  setTimeout(() => {
+    if (S.ws?.readyState === WebSocket.OPEN) {
+      S.ws.send(JSON.stringify({ type: 'chat', text }));
+    }
+  }, 500);
+  $('question-overlay').classList.remove('visible');
+  currentQuestionIdx++;
+  if (currentQuestions && currentQuestionIdx < currentQuestions.length) {
+    setTimeout(renderCurrentQuestion, 1000);
+  } else {
+    questionQueue.shift();
+    if (questionQueue.length > 0) setTimeout(showNextQuestion, 1000);
+    else currentQuestions = null;
+  }
+}
+
+$('question-other-btn').addEventListener('click', sendQuestionOther);
+$('question-other-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); sendQuestionOther(); }
+});
+
+// ============================================================
+//  ExitPlanMode — plan approval overlay (4 fixed options)
+// ============================================================
+const PLAN_OPTIONS = [
+  { num: '1', label: 'Yes, clear context and auto-accept edits', desc: 'Clear context + shift+tab' },
+  { num: '2', label: 'Yes, auto-accept edits', desc: 'Auto-accept edits mode' },
+  { num: '3', label: 'Yes, manually approve edits', desc: 'Review each edit' },
+];
+
+function showPlanApproval(input) {
+  const plan = input?.plan || '';
+  const contentEl = $('plan-content');
+  if (plan) {
+    contentEl.style.display = '';
+    contentEl.innerHTML = renderMd(plan);
+  } else {
+    contentEl.style.display = 'none';
+  }
+
+  const optionsEl = $('plan-options');
+  optionsEl.innerHTML = PLAN_OPTIONS.map(opt => `
+    <button class="question-opt" data-num="${opt.num}">
+      <span class="question-opt-num">${opt.num}</span>
+      <div class="question-opt-body">
+        <div class="question-opt-label">${esc(opt.label)}</div>
+        <div class="question-opt-desc">${esc(opt.desc)}</div>
+      </div>
+    </button>
+  `).join('');
+
+  optionsEl.querySelectorAll('.question-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+      S.ws.send(JSON.stringify({ type: 'input', data: btn.dataset.num }));
+      $('plan-overlay').classList.remove('visible');
+    });
+  });
+
+  $('plan-other-input').value = '';
+  $('plan-overlay').classList.add('visible');
+}
+
+function sendPlanOther() {
+  const text = $('plan-other-input').value.trim();
+  if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  S.ws.send(JSON.stringify({ type: 'input', data: '4' }));
+  setTimeout(() => {
+    if (S.ws?.readyState === WebSocket.OPEN) {
+      S.ws.send(JSON.stringify({ type: 'chat', text }));
+    }
+  }, 500);
+  $('plan-overlay').classList.remove('visible');
+}
+
+$('plan-other-btn').addEventListener('click', sendPlanOther);
+$('plan-other-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); sendPlanOther(); }
+});
 
 // ============================================================
 //  Keyboard handling for Android virtual keyboard

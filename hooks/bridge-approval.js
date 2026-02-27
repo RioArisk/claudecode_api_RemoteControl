@@ -18,6 +18,17 @@ process.stdin.on('end', () => {
   let data;
   try { data = JSON.parse(input); } catch { process.exit(0); }
 
+  // Auto-allow AskUserQuestion, ExitPlanMode, EnterPlanMode — handled via PTY interaction in remote UI
+  if (data.tool_name === 'AskUserQuestion' || data.tool_name === 'ExitPlanMode' || data.tool_name === 'EnterPlanMode') {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+      },
+    }));
+    process.exit(0);
+  }
+
   const body = JSON.stringify(data);
   const req = http.request({
     hostname: '127.0.0.1',

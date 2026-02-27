@@ -352,35 +352,6 @@ header {
 }
 #btn-send:hover { background: var(--accent); color: #fff; }
 
-/* ===== Mode Toggle Button ===== */
-#btn-mode {
-  height: 32px; border: 1px solid var(--border); border-radius: 16px;
-  background: var(--bg-white); cursor: pointer;
-  display: flex; align-items: center; gap: 5px;
-  padding: 0 10px 0 8px; flex-shrink: 0;
-  transition: all .15s; font-family: inherit;
-  white-space: nowrap;
-}
-#btn-mode:hover { border-color: var(--text-muted); }
-#btn-mode:active { transform: scale(.96); }
-#btn-mode.switching { opacity: .5; pointer-events: none; }
-#btn-mode .mode-icon {
-  width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted); flex-shrink: 0;
-}
-#btn-mode .mode-label {
-  font-size: 12px; font-weight: 600; color: var(--text-secondary);
-  letter-spacing: .2px;
-}
-#btn-mode.plan { border-color: #e8a000; background: #fff3e0; }
-#btn-mode.plan .mode-label { color: #e8a000; }
-#btn-mode.plan .mode-icon { color: #e8a000; }
-#btn-mode.acceptEdits { border-color: var(--accent); background: var(--accent-light); }
-#btn-mode.acceptEdits .mode-label { color: var(--accent); }
-#btn-mode.acceptEdits .mode-icon { color: var(--accent); }
-#btn-mode.bypassPermissions { border-color: var(--error); background: var(--error-bg); }
-#btn-mode.bypassPermissions .mode-label { color: var(--error); }
-#btn-mode.bypassPermissions .mode-icon { color: var(--error); }
 
 
 /* ===== Welcome ===== */
@@ -554,6 +525,127 @@ header {
 }
 .perm-btn-allow:hover { background: #247a5e; }
 
+/* ===== Question Overlay (AskUserQuestion) ===== */
+#question-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.35);
+  align-items: flex-end; justify-content: center;
+  animation: fadeIn .15s ease;
+}
+#question-overlay.visible { display: flex; }
+#question-dialog {
+  width: 100%; max-width: 480px;
+  background: var(--bg-white); border-radius: 16px 16px 0 0;
+  padding: 20px 20px 24px; box-shadow: 0 -4px 24px rgba(0,0,0,.12);
+  animation: slideUp .2s ease;
+}
+.question-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.question-icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: var(--accent-light); color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.question-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.question-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.question-text {
+  font-size: 14px; color: var(--text); margin-bottom: 14px; line-height: 1.5;
+}
+.question-options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.question-opt {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  background: var(--bg); border: 1px solid var(--border);
+  cursor: pointer; transition: all .15s; text-align: left;
+  font-family: inherit; font-size: 14px; color: var(--text);
+}
+.question-opt:hover { border-color: var(--accent); background: var(--accent-bg); }
+.question-opt:active { transform: scale(.98); }
+.question-opt-num {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent-light); color: var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; flex-shrink: 0;
+}
+.question-opt-body { min-width: 0; }
+.question-opt-label { font-weight: 600; }
+.question-opt-desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.question-other-row {
+  display: flex; gap: 8px;
+}
+.question-other-input {
+  flex: 1; padding: 9px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); font-family: inherit;
+  font-size: 13px; color: var(--text); background: var(--bg-white);
+  outline: none;
+}
+.question-other-input:focus { border-color: var(--accent); }
+.question-other-btn {
+  padding: 9px 16px; border-radius: var(--radius-sm);
+  background: var(--accent); color: #fff; border: none;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  font-family: inherit;
+}
+.question-other-btn:hover { background: #247a5e; }
+
+/* ===== Plan Approval Overlay (ExitPlanMode) ===== */
+#plan-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.35);
+  align-items: flex-end; justify-content: center;
+  animation: fadeIn .15s ease;
+}
+#plan-overlay.visible { display: flex; }
+#plan-dialog {
+  width: 100%; max-width: 480px;
+  background: var(--bg-white); border-radius: 16px 16px 0 0;
+  padding: 20px 20px 24px; box-shadow: 0 -4px 24px rgba(0,0,0,.12);
+  animation: slideUp .2s ease;
+  max-height: 85vh; overflow-y: auto;
+}
+.plan-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+}
+.plan-icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: #e8f0fe; color: #1967d2;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.plan-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.plan-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.plan-content {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px;
+  font-size: 13px; color: var(--text-secondary);
+  max-height: 200px; overflow-y: auto; line-height: 1.6;
+}
+.plan-content h1,.plan-content h2,.plan-content h3 {
+  font-size: 14px; margin: 8px 0 4px; color: var(--text);
+}
+.plan-content p { margin: 4px 0; }
+.plan-content ul,.plan-content ol { padding-left: 18px; margin: 4px 0; }
+.plan-options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.plan-other-row {
+  display: flex; gap: 8px;
+}
+.plan-other-input {
+  flex: 1; padding: 9px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); font-family: inherit;
+  font-size: 13px; color: var(--text); background: var(--bg-white);
+  outline: none;
+}
+.plan-other-input:focus { border-color: var(--accent); }
+.plan-other-btn {
+  padding: 9px 14px; border-radius: var(--radius-sm);
+  background: var(--accent); color: #fff; border: none;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  font-family: inherit;
+}
+.plan-other-btn:hover { background: #247a5e; }
+
 /* ===== Slash Command Menu ===== */
 #cmd-menu {
   display: none; position: absolute; bottom: 100%; left: 0; right: 0;
@@ -647,10 +739,6 @@ header {
   <div id="input-area">
     <div id="cmd-menu"></div>
     <div id="input-row">
-      <button id="btn-mode" title="Switch mode (Shift+Tab)">
-        <span class="mode-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg></span>
-        <span class="mode-label" id="mode-label">Default</span>
-      </button>
       <div class="input-pill">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
         <textarea id="input" placeholder="Reply..." rows="1"></textarea>
@@ -690,6 +778,46 @@ header {
     </div>
   </div>
 
+  <div id="question-overlay">
+    <div id="question-dialog">
+      <div class="question-header">
+        <div class="question-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><circle cx="12" cy="17" r=".5"/></svg>
+        </div>
+        <div>
+          <div class="question-title" id="question-header-text">Question</div>
+          <div class="question-sub">Claude needs your input</div>
+        </div>
+      </div>
+      <div class="question-text" id="question-text"></div>
+      <div class="question-options" id="question-options"></div>
+      <div class="question-other-row">
+        <input class="question-other-input" id="question-other-input" type="text" placeholder="Other...">
+        <button class="question-other-btn" id="question-other-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="plan-overlay">
+    <div id="plan-dialog">
+      <div class="plan-header">
+        <div class="plan-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <div>
+          <div class="plan-title">Plan Ready</div>
+          <div class="plan-sub">Would you like to proceed?</div>
+        </div>
+      </div>
+      <div class="plan-content" id="plan-content"></div>
+      <div class="plan-options" id="plan-options"></div>
+      <div class="plan-other-row">
+        <input class="plan-other-input" id="plan-other-input" type="text" placeholder="Tell Claude what to change...">
+        <button class="plan-other-btn" id="plan-other-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -712,6 +840,7 @@ const S = {
   model: '',                // model name from assistant events
   mode: 'default',          // permission mode
   pendingPerms: [],          // queue of permission requests [{id, toolName, toolInput}]
+  replaying: true,           // true during history replay, false after replay_done
 };
 
 const $ = id => document.getElementById(id);
@@ -775,7 +904,6 @@ function setWaiting(on) {
     scrollEnd();
   } else {
     removeThinkingIndicator();
-    $input.focus();
   }
   updateSendBtn();
 }
@@ -817,13 +945,7 @@ function updateHeaderInfo() {
   updateModeButton();
 }
 
-function updateModeButton() {
-  const btn = $('btn-mode');
-  btn.className = '';  // reset
-  const labels = { default: 'Default', plan: 'Plan', acceptEdits: 'Accept Edits', bypassPermissions: 'Bypass' };
-  $('mode-label').textContent = labels[S.mode] || 'Default';
-  if (S.mode !== 'default') btn.classList.add(S.mode);
-}
+function updateModeButton() {}
 
 // ============================================================
 //  Tool Icons (SVG)
@@ -1030,7 +1152,15 @@ function renderAssistant(evt) {
   for (const b of blocks) {
     if (b.type === 'thinking' && b.thinking) renderThinking(b);
     else if (b.type === 'text' && b.text) { closeGroup(); renderText(b.text, msgId); }
-    else if (b.type === 'tool_use') renderTool(b);
+    else if (b.type === 'tool_use') {
+      if (b.name === 'AskUserQuestion' && b.input && b.input.questions) {
+        if (!S.replaying) showQuestion(b.input.questions);
+      } else if (b.name === 'ExitPlanMode') {
+        if (!S.replaying) showPlanApproval(b.input);
+      } else {
+        renderTool(b);
+      }
+    }
   }
 
   // Show token count when turn ends
@@ -1332,19 +1462,6 @@ $input.addEventListener('keydown', e => {
 $('btn-send').addEventListener('click', send);
 $('btn-scroll').addEventListener('click', () => { $chat.scrollTop = $chat.scrollHeight; });
 
-// Mode toggle — sends Shift+Tab to PTY, debounced
-let modeSwitching = false;
-$('btn-mode').addEventListener('click', () => {
-  if (modeSwitching || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
-  modeSwitching = true;
-  $('btn-mode').classList.add('switching');
-  S.ws.send(JSON.stringify({ type: 'input', data: '\x1b[Z' }));
-  // Unlock after mode detection fires or timeout
-  setTimeout(() => {
-    modeSwitching = false;
-    $('btn-mode').classList.remove('switching');
-  }, 800);
-});
 updateSendBtn();
 
 function send() {
@@ -1372,6 +1489,7 @@ function send() {
 //  WebSocket
 // ============================================================
 function connect() {
+  S.replaying = true;
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
   S.ws = ws;
   ws.onopen = () => { setStatus('connected'); setConnBanner(false); };
@@ -1380,6 +1498,7 @@ function connect() {
     if (m.type === 'pty_output') { /* ignored – terminal panel removed */ }
     else if (m.type === 'log_event') processEvent(m.event);
     else if (m.type === 'transcript_ready') { setStatus('connected'); }
+    else if (m.type === 'replay_done') { S.replaying = false; }
     else if (m.type === 'status') {
       setStatus(m.status === 'running' ? 'connected' : 'starting');
       if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
@@ -1388,9 +1507,6 @@ function connect() {
     else if (m.type === 'permission_request') showPermission(m);
     else if (m.type === 'mode') {
       S.mode = m.mode; updateHeaderInfo();
-      // Unlock mode button early on actual mode change
-      modeSwitching = false;
-      $('btn-mode').classList.remove('switching');
     }
   };
   ws.onclose = () => { setStatus('disconnected'); setConnBanner(true, true); setTimeout(connect, 2000); };
@@ -1474,6 +1590,167 @@ function resolvePermission(decision) {
 
 $('perm-allow').addEventListener('click', () => resolvePermission('allow'));
 $('perm-deny').addEventListener('click', () => resolvePermission('deny'));
+
+// ============================================================
+//  AskUserQuestion — interactive question overlay
+// ============================================================
+let questionQueue = [];  // array of questions arrays
+let currentQuestions = null;
+let currentQuestionIdx = 0;
+
+function showQuestion(questions) {
+  questionQueue.push(questions);
+  if (questionQueue.length === 1) showNextQuestion();
+}
+
+function showNextQuestion() {
+  if (questionQueue.length === 0) {
+    $('question-overlay').classList.remove('visible');
+    currentQuestions = null;
+    return;
+  }
+  currentQuestions = questionQueue[0];
+  currentQuestionIdx = 0;
+  renderCurrentQuestion();
+}
+
+function renderCurrentQuestion() {
+  if (!currentQuestions || currentQuestionIdx >= currentQuestions.length) {
+    questionQueue.shift();
+    showNextQuestion();
+    return;
+  }
+  const q = currentQuestions[currentQuestionIdx];
+  $('question-header-text').textContent = q.header || 'Question';
+  $('question-text').textContent = q.question || '';
+
+  const optionsEl = $('question-options');
+  const options = q.options || [];
+  optionsEl.innerHTML = options.map((opt, i) => `
+    <button class="question-opt" data-idx="${i + 1}">
+      <span class="question-opt-num">${i + 1}</span>
+      <div class="question-opt-body">
+        <div class="question-opt-label">${esc(opt.label)}</div>
+        ${opt.description ? `<div class="question-opt-desc">${esc(opt.description)}</div>` : ''}
+      </div>
+    </button>
+  `).join('');
+
+  optionsEl.querySelectorAll('.question-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = btn.dataset.idx;
+      sendQuestionAnswer(idx);
+    });
+  });
+
+  $('question-other-input').value = '';
+  $('question-overlay').classList.add('visible');
+}
+
+function sendQuestionAnswer(numKey) {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  // Send number key to PTY — instant selection in Claude CLI
+  S.ws.send(JSON.stringify({ type: 'input', data: String(numKey) }));
+  $('question-overlay').classList.remove('visible');
+  // Move to next question in the array if any
+  currentQuestionIdx++;
+  if (currentQuestions && currentQuestionIdx < currentQuestions.length) {
+    setTimeout(renderCurrentQuestion, 500);
+  } else {
+    questionQueue.shift();
+    if (questionQueue.length > 0) setTimeout(showNextQuestion, 500);
+    else currentQuestions = null;
+  }
+}
+
+function sendQuestionOther() {
+  const text = $('question-other-input').value.trim();
+  if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  const options = currentQuestions?.[currentQuestionIdx]?.options || [];
+  // "Other" is always the last option (+1 after the defined options)
+  const otherNum = String(options.length + 1);
+  S.ws.send(JSON.stringify({ type: 'input', data: otherNum }));
+  // Wait for the "Other" input field to appear in CLI, then type the text
+  setTimeout(() => {
+    if (S.ws?.readyState === WebSocket.OPEN) {
+      S.ws.send(JSON.stringify({ type: 'chat', text }));
+    }
+  }, 500);
+  $('question-overlay').classList.remove('visible');
+  currentQuestionIdx++;
+  if (currentQuestions && currentQuestionIdx < currentQuestions.length) {
+    setTimeout(renderCurrentQuestion, 1000);
+  } else {
+    questionQueue.shift();
+    if (questionQueue.length > 0) setTimeout(showNextQuestion, 1000);
+    else currentQuestions = null;
+  }
+}
+
+$('question-other-btn').addEventListener('click', sendQuestionOther);
+$('question-other-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); sendQuestionOther(); }
+});
+
+// ============================================================
+//  ExitPlanMode — plan approval overlay (4 fixed options)
+// ============================================================
+const PLAN_OPTIONS = [
+  { num: '1', label: 'Yes, clear context and auto-accept edits', desc: 'Clear context + shift+tab' },
+  { num: '2', label: 'Yes, auto-accept edits', desc: 'Auto-accept edits mode' },
+  { num: '3', label: 'Yes, manually approve edits', desc: 'Review each edit' },
+];
+
+function showPlanApproval(input) {
+  const plan = input?.plan || '';
+  const contentEl = $('plan-content');
+  if (plan) {
+    contentEl.style.display = '';
+    contentEl.innerHTML = renderMd(plan);
+  } else {
+    contentEl.style.display = 'none';
+  }
+
+  const optionsEl = $('plan-options');
+  optionsEl.innerHTML = PLAN_OPTIONS.map(opt => `
+    <button class="question-opt" data-num="${opt.num}">
+      <span class="question-opt-num">${opt.num}</span>
+      <div class="question-opt-body">
+        <div class="question-opt-label">${esc(opt.label)}</div>
+        <div class="question-opt-desc">${esc(opt.desc)}</div>
+      </div>
+    </button>
+  `).join('');
+
+  optionsEl.querySelectorAll('.question-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+      S.ws.send(JSON.stringify({ type: 'input', data: btn.dataset.num }));
+      $('plan-overlay').classList.remove('visible');
+    });
+  });
+
+  $('plan-other-input').value = '';
+  $('plan-overlay').classList.add('visible');
+}
+
+function sendPlanOther() {
+  const text = $('plan-other-input').value.trim();
+  if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  // Option 4 = "Type here to tell Claude what to change"
+  S.ws.send(JSON.stringify({ type: 'input', data: '4' }));
+  setTimeout(() => {
+    if (S.ws?.readyState === WebSocket.OPEN) {
+      S.ws.send(JSON.stringify({ type: 'chat', text }));
+    }
+  }, 500);
+  $('plan-overlay').classList.remove('visible');
+}
+
+$('plan-other-btn').addEventListener('click', sendPlanOther);
+$('plan-other-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); sendPlanOther(); }
+});
 
 connect();
 $input.focus();
