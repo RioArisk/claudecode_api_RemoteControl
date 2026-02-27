@@ -382,6 +382,85 @@ header {
   max-height: 250px; overflow-y: auto;
 }
 
+/* ===== Diff View ===== */
+.diff-view {
+  overflow: hidden;
+}
+.diff-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-hover);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px; font-family: var(--mono);
+  color: var(--text-secondary);
+}
+.diff-header .diff-file-icon {
+  opacity: .5; flex-shrink: 0;
+}
+.diff-header .diff-file-path {
+  font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.diff-body {
+  overflow-x: auto; max-height: 350px; overflow-y: auto;
+}
+.diff-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 12px; font-family: var(--mono);
+  line-height: 1.55;
+}
+.diff-table td {
+  padding: 0; vertical-align: top;
+  border: none;
+}
+.diff-ln {
+  width: 1px; white-space: nowrap;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-muted);
+  opacity: .6;
+  user-select: none;
+  font-size: 11px;
+}
+.diff-sign {
+  width: 1px; white-space: nowrap;
+  padding: 0 2px 0 4px;
+  user-select: none;
+  font-weight: 700;
+}
+.diff-code {
+  padding: 0 12px 0 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+/* Delete line */
+.diff-del { background: #fff0f0; }
+.diff-del .diff-sign { color: #d73a49; }
+.diff-del .diff-code { color: #6e3630; }
+.diff-del .diff-ln { background: #ffdce0; }
+/* Add line */
+.diff-add { background: #e6ffec; }
+.diff-add .diff-sign { color: #22863a; }
+.diff-add .diff-code { color: #24602e; }
+.diff-add .diff-ln { background: #ccffd8; }
+/* Context line */
+.diff-ctx { background: var(--code-bg); }
+.diff-ctx .diff-sign { color: transparent; }
+.diff-ctx .diff-code { color: var(--text-secondary); }
+/* Hunk separator */
+.diff-hunk {
+  background: #f1f8ff; color: #7b93a8;
+  font-size: 11px;
+}
+.diff-hunk td { padding: 4px 12px; }
+/* Stats badge */
+.diff-stats {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: auto; font-size: 11px; font-weight: 600;
+}
+.diff-stats .ds-add { color: #22863a; }
+.diff-stats .ds-del { color: #d73a49; }
+
 /* Token count */
 .token-count {
   font-size: 12px; color: var(--accent);

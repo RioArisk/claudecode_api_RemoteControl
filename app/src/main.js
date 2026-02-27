@@ -284,6 +284,82 @@ function toolInputFull(name, input) {
 }
 
 // ============================================================
+//  Diff Rendering
+// ============================================================
+function buildDiffHtml(oldStr, newStr, filePath) {
+  const oldLines = (oldStr || '').split('\n');
+  const newLines = (newStr || '').split('\n');
+
+  // Simple LCS-based diff
+  const m = oldLines.length, n = newLines.length;
+  // Optimisation: limit to reasonable size to avoid O(m*n) blowup
+  if (m * n > 500000) {
+    // Fallback: show all old as deleted, all new as added
+    return buildDiffFallback(oldLines, newLines, filePath);
+  }
+
+  // Build LCS table
+  const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = oldLines[i - 1] === newLines[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1]);
+
+  // Backtrack to produce diff ops
+  const ops = []; // { type: 'ctx'|'del'|'add', text, oldLn?, newLn? }
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+      ops.push({ type: 'ctx', text: oldLines[i - 1], oldLn: i, newLn: j });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.push({ type: 'add', text: newLines[j - 1], newLn: j });
+      j--;
+    } else {
+      ops.push({ type: 'del', text: oldLines[i - 1], oldLn: i });
+      i--;
+    }
+  }
+  ops.reverse();
+
+  return renderDiffOps(ops, filePath);
+}
+
+function buildDiffFallback(oldLines, newLines, filePath) {
+  const ops = [];
+  oldLines.forEach((l, i) => ops.push({ type: 'del', text: l, oldLn: i + 1 }));
+  newLines.forEach((l, i) => ops.push({ type: 'add', text: l, newLn: i + 1 }));
+  return renderDiffOps(ops, filePath);
+}
+
+function renderDiffOps(ops, filePath) {
+  let addCount = 0, delCount = 0;
+  ops.forEach(o => { if (o.type === 'add') addCount++; if (o.type === 'del') delCount++; });
+
+  let rows = '';
+  for (const o of ops) {
+    const cls = o.type === 'del' ? 'diff-del' : o.type === 'add' ? 'diff-add' : 'diff-ctx';
+    const sign = o.type === 'del' ? '-' : o.type === 'add' ? '+' : ' ';
+    const oldN = o.oldLn != null ? o.oldLn : '';
+    const newN = o.newLn != null ? o.newLn : '';
+    rows += `<tr class="${cls}"><td class="diff-ln">${oldN}</td><td class="diff-ln">${newN}</td><td class="diff-sign">${sign}</td><td class="diff-code">${esc(o.text)}</td></tr>`;
+  }
+
+  const ext = (filePath || '').split('.').pop() || '';
+  const shortPath = shortenPath(filePath);
+
+  return `<div class="diff-view">
+    <div class="diff-header">
+      <svg class="diff-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="diff-file-path" title="${esc(filePath)}">${esc(shortPath)}</span>
+      <span class="diff-stats"><span class="ds-add">+${addCount}</span><span class="ds-del">-${delCount}</span></span>
+    </div>
+    <div class="diff-body"><table class="diff-table">${rows}</table></div>
+  </div>`;
+}
+
+// ============================================================
 //  Rendering — step group management
 // ============================================================
 function closeGroup() {
@@ -549,10 +625,18 @@ function renderTool(b) {
   detail.className = 'step-detail';
   detail.id = `detail-${b.id}`;
   const inputFull = toolInputFull(b.name, b.input);
-  detail.innerHTML = `
-    <div class="detail-input">${esc(inputFull)}</div>
-    <div class="detail-result" id="result-${b.id}"></div>
-  `;
+
+  // Edit tool: render diff view
+  const isEdit = b.name === 'Edit' && b.input && b.input.old_string !== undefined;
+  if (isEdit) {
+    detail.innerHTML = buildDiffHtml(b.input.old_string, b.input.new_string, b.input.file_path)
+      + `<div class="detail-result" id="result-${b.id}"></div>`;
+  } else {
+    detail.innerHTML = `
+      <div class="detail-input">${esc(inputFull)}</div>
+      <div class="detail-result" id="result-${b.id}"></div>
+    `;
+  }
 
   item.addEventListener('click', () => detail.classList.toggle('open'));
   list.appendChild(item);
