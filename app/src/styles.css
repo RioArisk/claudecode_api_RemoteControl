@@ -270,6 +270,7 @@ header {
   font-size: 13px; color: var(--text-muted); line-height: 1.6;
   white-space: pre-wrap; word-break: break-word;
   max-height: 300px; overflow-y: auto;
+  overscroll-behavior-y: contain;
 }
 .thinking.open .thinking-content { display: block; }
 
@@ -368,6 +369,7 @@ header {
   font-family: var(--mono); line-height: 1.5;
   overflow-x: auto; white-space: pre-wrap; word-break: break-word;
   max-height: 300px; overflow-y: auto;
+  overscroll-behavior-y: contain;
   color: var(--text-secondary);
 }
 .step-detail.error pre { color: var(--error); }
@@ -380,6 +382,7 @@ header {
   padding: 10px 12px; font-size: 12px; font-family: var(--mono);
   white-space: pre-wrap; word-break: break-word;
   max-height: 250px; overflow-y: auto;
+  overscroll-behavior-y: contain;
 }
 
 /* ===== Diff View ===== */
@@ -403,6 +406,7 @@ header {
 }
 .diff-body {
   overflow-x: auto; max-height: 350px; overflow-y: auto;
+  overscroll-behavior-y: contain;
 }
 .diff-table {
   width: 100%; border-collapse: collapse;
