@@ -1055,6 +1055,16 @@ function processEvent(evt, seq) {
       return;
     }
 
+    // Local command results (e.g. /cost)
+    if (evt.type === 'system' && evt.subtype === 'local_command') {
+      const raw = (evt.content || '').replace(/<\/?local-command-stdout>/g, '').replace(/\x1B\[[0-9;]*m/g, '').trim();
+      if (raw.includes('Total cost:')) {
+        renderCostCard(raw);
+        scrollEnd();
+      }
+      return;
+    }
+
     if (evt.type === 'user' && evt.message) {
       const c = evt.message.content;
       if (typeof c === 'string' && isJunkContent(c)) return;
@@ -1137,6 +1147,75 @@ function renderUser(evt) {
     el.innerHTML = esc(c).replace(/\n/g, '<br>');
     $msgs.appendChild(el);
   }
+}
+
+// --- Cost Card ---
+function renderCostCard(raw) {
+  closeGroup();
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // Parse fields
+  let totalCost = '', apiDuration = '', wallDuration = '', codeChanges = '';
+  const models = [];
+  let inModels = false;
+
+  for (const line of lines) {
+    if (line.startsWith('Total cost:')) totalCost = line.replace('Total cost:', '').trim();
+    else if (line.startsWith('Total duration (API):')) apiDuration = line.replace('Total duration (API):', '').trim();
+    else if (line.startsWith('Total duration (wall):')) wallDuration = line.replace('Total duration (wall):', '').trim();
+    else if (line.startsWith('Total code changes:')) codeChanges = line.replace('Total code changes:', '').trim();
+    else if (line.startsWith('Usage by model:')) inModels = true;
+    else if (inModels) {
+      // e.g. "claude-opus-4-6:  3 input, 295 output, 10.5k cache read, 13.7k cache write ($0.0983)"
+      const m = line.match(/^(.+?):\s*(.+)\((\$[\d.]+)\)\s*$/);
+      if (m) {
+        models.push({ name: m[1].trim(), detail: m[2].trim().replace(/,\s*$/, ''), cost: m[3] });
+      } else {
+        // fallback: model line without cost in parens
+        const m2 = line.match(/^(.+?):\s*(.+)$/);
+        if (m2) models.push({ name: m2[1].trim(), detail: m2[2].trim(), cost: '' });
+      }
+    }
+  }
+
+  const el = document.createElement('div');
+  el.className = 'cost-card';
+  el.innerHTML = `
+    <div class="cost-header">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+      <span>费用概览</span>
+    </div>
+    <div class="cost-grid">
+      <div class="cost-item">
+        <div class="cost-label">总费用</div>
+        <div class="cost-value cost-highlight">${esc(totalCost)}</div>
+      </div>
+      <div class="cost-item">
+        <div class="cost-label">API 耗时</div>
+        <div class="cost-value">${esc(apiDuration)}</div>
+      </div>
+      <div class="cost-item">
+        <div class="cost-label">实际耗时</div>
+        <div class="cost-value">${esc(wallDuration)}</div>
+      </div>
+      <div class="cost-item">
+        <div class="cost-label">代码变更</div>
+        <div class="cost-value">${esc(codeChanges)}</div>
+      </div>
+    </div>
+    ${models.length ? `
+    <div class="cost-models">
+      <div class="cost-models-title">模型用量</div>
+      ${models.map(m => `
+        <div class="cost-model-row">
+          <div class="cost-model-name">${esc(m.name)}</div>
+          <div class="cost-model-detail">${esc(m.detail)}</div>
+          ${m.cost ? `<div class="cost-model-cost">${esc(m.cost)}</div>` : ''}
+        </div>
+      `).join('')}
+    </div>` : ''}
+  `;
+  $msgs.appendChild(el);
 }
 
 // --- Compact Summary ---
@@ -1375,6 +1454,18 @@ function execCmd(cmd) {
 
   if (cmd === '/model') {
     showModelPicker();
+    return;
+  }
+
+  // /cost: show user bubble then wait for JSONL event
+  if (cmd === '/cost') {
+    closeGroup();
+    const el = document.createElement('div');
+    el.className = 'user-msg';
+    el.textContent = '/cost';
+    $msgs.appendChild(el);
+    scrollEnd();
+    sendSlashCmd(cmd);
     return;
   }
 
