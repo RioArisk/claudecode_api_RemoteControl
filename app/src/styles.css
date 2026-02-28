@@ -1264,6 +1264,34 @@ header {
   font-family: var(--mono); margin-top: 2px;
 }
 
+/* ===== Plan Inline Card (session switch) ===== */
+.plan-inline-card {
+  margin: 12px 0; padding: 0;
+  background: var(--bg-white); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+  animation: fadeUp .25s ease; font-size: 14px;
+}
+.plan-inline-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; font-weight: 600; font-size: 14px;
+  color: #1967d2; border-bottom: 1px solid var(--border);
+  background: #e8f0fe;
+}
+.plan-inline-header svg { flex-shrink: 0; }
+.plan-inline-body {
+  padding: 12px 16px; font-size: 13px; color: var(--text-secondary);
+  line-height: 1.6; max-height: 300px; overflow-y: auto;
+}
+.plan-inline-body h1,.plan-inline-body h2,.plan-inline-body h3 {
+  font-size: 14px; margin: 8px 0 4px; color: var(--text);
+}
+.plan-inline-body p { margin: 4px 0; }
+.plan-inline-body ul,.plan-inline-body ol { padding-left: 18px; margin: 4px 0; }
+.plan-inline-body code {
+  background: var(--code-bg); padding: 1px 4px; border-radius: 3px;
+  font-size: 12px;
+}
+
 /* ===== Mobile-specific ===== */
 @media (max-width: 600px) {
   #messages { padding: 10px 14px; }

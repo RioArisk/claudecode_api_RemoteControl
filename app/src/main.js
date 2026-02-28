@@ -1051,6 +1051,25 @@ function processEvent(evt, seq) {
     if (evt.type === 'user' && evt.message) {
       const c = evt.message.content;
       if (typeof c === 'string' && isJunkContent(c)) return;
+      // Hide "[Request interrupted by user...]" carry-over from session switch
+      if (typeof c === 'string' && /^\[Request interrupted by user/.test(c.trim())) return;
+      if (Array.isArray(c) && c.length === 1 && c[0].type === 'text' &&
+          /^\[Request interrupted by user/.test(c[0].text)) return;
+      // Plan mode: render plan card instead of raw "Implement the following plan:" message
+      const planPrefix = 'Implement the following plan:';
+      const rawText = typeof c === 'string' ? c
+        : (Array.isArray(c) && c.length >= 1 && c[0].type === 'text' ? c[0].text : '');
+      if (rawText.trimStart().startsWith(planPrefix)) {
+        // Extract the plan markdown (everything after the prefix, before the transcript hint)
+        let planBody = rawText.trimStart().slice(planPrefix.length).trim();
+        // Strip the trailing "If you need specific details..." boilerplate
+        const boilerplateIdx = planBody.indexOf('\nIf you need specific details from before exiting plan mode');
+        if (boilerplateIdx !== -1) planBody = planBody.slice(0, boilerplateIdx).trim();
+        if (planBody) {
+          renderPlanCard(planBody);
+          return;
+        }
+      }
     }
     if (evt.type === 'assistant' && evt.message) {
       const blocks = evt.message.content;
@@ -1195,6 +1214,23 @@ function renderCostCard(raw) {
         </div>
       `).join('')}
     </div>` : ''}
+  `;
+  $msgs.appendChild(el);
+}
+
+// --- Plan Card (shown at top of new session after plan mode option 1) ---
+function renderPlanCard(planContent) {
+  // Avoid duplicates
+  if ($msgs.querySelector('.plan-inline-card')) return;
+  closeGroup();
+  const el = document.createElement('div');
+  el.className = 'plan-inline-card';
+  el.innerHTML = `
+    <div class="plan-inline-header">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12l2 2 4-4"/></svg>
+      <span>执行计划</span>
+    </div>
+    <div class="plan-inline-body">${renderMd(planContent)}</div>
   `;
   $msgs.appendChild(el);
 }

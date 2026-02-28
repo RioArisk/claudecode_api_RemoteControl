@@ -778,6 +778,34 @@ header {
 .model-item .mi-name { font-size: 14px; color: var(--text); }
 .model-item .mi-desc { font-size: 12px; color: var(--text-muted); }
 
+/* ===== Plan Inline Card (session switch) ===== */
+.plan-inline-card {
+  margin: 12px 0; padding: 0;
+  background: var(--bg-white); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+  animation: fadeUp .25s ease; font-size: 14px;
+}
+.plan-inline-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; font-weight: 600; font-size: 14px;
+  color: #1967d2; border-bottom: 1px solid var(--border);
+  background: #e8f0fe;
+}
+.plan-inline-header svg { flex-shrink: 0; }
+.plan-inline-body {
+  padding: 12px 16px; font-size: 13px; color: var(--text-secondary);
+  line-height: 1.6; max-height: 300px; overflow-y: auto;
+}
+.plan-inline-body h1,.plan-inline-body h2,.plan-inline-body h3 {
+  font-size: 14px; margin: 8px 0 4px; color: var(--text);
+}
+.plan-inline-body p { margin: 4px 0; }
+.plan-inline-body ul,.plan-inline-body ol { padding-left: 18px; margin: 4px 0; }
+.plan-inline-body code {
+  background: var(--code-bg); padding: 1px 4px; border-radius: 3px;
+  font-size: 12px;
+}
+
 @media (max-width: 600px) {
   #messages { padding: 12px 16px; }
   .step-desc { max-width: 120px; }
@@ -1236,6 +1264,23 @@ function processEvent(evt, seq) {
   if (evt.type === 'user' && evt.message) {
     const c = evt.message.content;
     if (typeof c === 'string' && isJunkContent(c)) return;
+    // Hide "[Request interrupted by user...]" carry-over from session switch
+    if (typeof c === 'string' && /^\[Request interrupted by user/.test(c.trim())) return;
+    if (Array.isArray(c) && c.length === 1 && c[0].type === 'text' &&
+        /^\[Request interrupted by user/.test(c[0].text)) return;
+    // Plan mode: render plan card instead of raw "Implement the following plan:" message
+    const planPrefix = 'Implement the following plan:';
+    const rawText = typeof c === 'string' ? c
+      : (Array.isArray(c) && c.length >= 1 && c[0].type === 'text' ? c[0].text : '');
+    if (rawText.trimStart().startsWith(planPrefix)) {
+      let planBody = rawText.trimStart().slice(planPrefix.length).trim();
+      const boilerplateIdx = planBody.indexOf('\nIf you need specific details from before exiting plan mode');
+      if (boilerplateIdx !== -1) planBody = planBody.slice(0, boilerplateIdx).trim();
+      if (planBody) {
+        renderPlanCard(planBody);
+        return;
+      }
+    }
   }
   if (evt.type === 'assistant' && evt.message) {
     const blocks = evt.message.content;
@@ -1277,6 +1322,22 @@ function renderUser(evt) {
     el.innerHTML = esc(c).replace(/\n/g, '<br>');
     $msgs.appendChild(el);
   }
+}
+
+// --- Plan Card (shown at top of new session after plan mode option 1) ---
+function renderPlanCard(planContent) {
+  if ($msgs.querySelector('.plan-inline-card')) return;
+  closeGroup();
+  const el = document.createElement('div');
+  el.className = 'plan-inline-card';
+  el.innerHTML = `
+    <div class="plan-inline-header">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12l2 2 4-4"/></svg>
+      <span>执行计划</span>
+    </div>
+    <div class="plan-inline-body">${renderMd(planContent)}</div>
+  `;
+  $msgs.appendChild(el);
 }
 
 // --- Compact Summary ---
