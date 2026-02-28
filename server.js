@@ -15,18 +15,23 @@ const PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
 // --- State ---
 let claudeProc = null;
 let transcriptPath = null;
+let currentSessionId = null;
 let transcriptOffset = 0;
 let eventBuffer = [];
+let eventSeq = 0;
 let tailTimer = null;
 let discoveryTimer = null;
 let preExistingFiles = new Set();
 let preExistingFileSizes = new Map();
 let tailRemainder = Buffer.alloc(0);
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
+const LEGACY_REPLAY_DELAY_MS = 1500;
+const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
 
 // --- Permission approval state ---
 let approvalSeq = 0;
 const pendingApprovals = new Map();  // id → { res, timer }
+const pendingImageUploads = new Map();
 let currentMode = 'default';
 let approvalMode = 'default';  // 'default' | 'partial' | 'all'
 const ALWAYS_AUTO_ALLOW = new Set(['TaskCreate', 'TaskUpdate']);
@@ -152,25 +157,137 @@ function broadcast(msg) {
   }
 }
 
+function latestEventSeq() {
+  return eventBuffer.length > 0 ? eventBuffer[eventBuffer.length - 1].seq : 0;
+}
+
+function sendReplay(ws, lastSeq = null) {
+  const normalizedLastSeq = Number.isInteger(lastSeq) && lastSeq >= 0 ? lastSeq : null;
+  const replayFrom = normalizedLastSeq == null ? 0 : normalizedLastSeq;
+  const records = replayFrom > 0
+    ? eventBuffer.filter(record => record.seq > replayFrom)
+    : eventBuffer;
+
+  for (const record of records) {
+    ws.send(JSON.stringify({
+      type: 'log_event',
+      seq: record.seq,
+      event: record.event,
+    }));
+  }
+
+  ws.send(JSON.stringify({
+    type: 'replay_done',
+    sessionId: currentSessionId,
+    lastSeq: latestEventSeq(),
+    resumed: normalizedLastSeq != null,
+  }));
+}
+
+function sendUploadStatus(ws, uploadId, status, extra = {}) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: 'image_upload_status',
+    uploadId,
+    status,
+    ...extra,
+  }));
+}
+
+function cleanupImageUpload(uploadId) {
+  const upload = pendingImageUploads.get(uploadId);
+  if (!upload) return;
+  if (upload.tmpFile) {
+    try { fs.unlinkSync(upload.tmpFile); } catch {}
+  }
+  pendingImageUploads.delete(uploadId);
+}
+
+function cleanupClientUploads(ws) {
+  for (const [uploadId, upload] of pendingImageUploads) {
+    if (upload.owner === ws) cleanupImageUpload(uploadId);
+  }
+}
+
+function createTempImageFile(buffer, mediaType, uploadId) {
+  const tmpDir = process.env.CLAUDE_CODE_TMPDIR || os.tmpdir();
+  const type = String(mediaType || 'image/png').toLowerCase();
+  const ext = type.includes('jpeg') || type.includes('jpg') ? '.jpg' : '.png';
+  const tmpFile = path.join(tmpDir, `bridge_upload_${uploadId}_${Date.now()}${ext}`);
+  fs.writeFileSync(tmpFile, buffer);
+  return tmpFile;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [uploadId, upload] of pendingImageUploads) {
+    if ((upload.updatedAt || 0) < (now - IMAGE_UPLOAD_TTL_MS)) {
+      cleanupImageUpload(uploadId);
+    }
+  }
+}, 60 * 1000).unref();
+
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify({
     type: 'status',
     status: claudeProc ? 'running' : 'starting',
     hasTranscript: !!transcriptPath,
     cwd: CWD,
+    sessionId: currentSessionId,
+    lastSeq: latestEventSeq(),
   }));
 
-  // Replay buffered JSONL events
-  for (const evt of eventBuffer) {
-    ws.send(JSON.stringify({ type: 'log_event', event: evt }));
+  if (currentSessionId) {
+    ws.send(JSON.stringify({
+      type: 'transcript_ready',
+      transcript: transcriptPath,
+      sessionId: currentSessionId,
+      lastSeq: latestEventSeq(),
+    }));
   }
-  ws.send(JSON.stringify({ type: 'replay_done' }));
+
+  // New clients should explicitly request a resume window. Keep a delayed
+  // full replay fallback so older clients still work.
+  ws._resumeHandled = false;
+  ws._legacyReplayTimer = setTimeout(() => {
+    if (ws.readyState !== WebSocket.OPEN || ws._resumeHandled) return;
+    ws._resumeHandled = true;
+    sendReplay(ws, null);
+  }, LEGACY_REPLAY_DELAY_MS);
 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
     switch (msg.type) {
+      case 'resume': {
+        ws._resumeHandled = true;
+        if (ws._legacyReplayTimer) {
+          clearTimeout(ws._legacyReplayTimer);
+          ws._legacyReplayTimer = null;
+        }
+
+        if (!currentSessionId) {
+          ws.send(JSON.stringify({
+            type: 'replay_done',
+            sessionId: null,
+            lastSeq: 0,
+            resumed: false,
+          }));
+          break;
+        }
+
+        const canResume = (
+          msg.sessionId &&
+          msg.sessionId === currentSessionId &&
+          Number.isInteger(msg.lastSeq) &&
+          msg.lastSeq >= 0 &&
+          msg.lastSeq <= latestEventSeq()
+        );
+
+        sendReplay(ws, canResume ? msg.lastSeq : null);
+        break;
+      }
       case 'input':
         // Raw terminal keystrokes from xterm.js in WebUI
         if (claudeProc) claudeProc.write(msg.data);
@@ -227,11 +344,142 @@ wss.on('connection', (ws) => {
         }
         break;
       }
+      case 'image_upload_init': {
+        const uploadId = String(msg.uploadId || '');
+        if (!uploadId) {
+          sendUploadStatus(ws, '', 'error', { message: 'Missing uploadId' });
+          break;
+        }
+        cleanupImageUpload(uploadId);
+        pendingImageUploads.set(uploadId, {
+          id: uploadId,
+          owner: ws,
+          mediaType: msg.mediaType || 'image/png',
+          name: msg.name || 'image',
+          totalBytes: Number.isFinite(msg.totalBytes) ? msg.totalBytes : 0,
+          totalChunks: Number.isFinite(msg.totalChunks) ? msg.totalChunks : 0,
+          nextChunkIndex: 0,
+          receivedBytes: 0,
+          chunks: [],
+          tmpFile: null,
+          updatedAt: Date.now(),
+        });
+        sendUploadStatus(ws, uploadId, 'ready_for_chunks', { receivedBytes: 0, totalBytes: msg.totalBytes || 0 });
+        break;
+      }
+      case 'image_upload_chunk': {
+        const uploadId = String(msg.uploadId || '');
+        const upload = pendingImageUploads.get(uploadId);
+        if (!upload) {
+          sendUploadStatus(ws, uploadId, 'error', { message: 'Upload session not found' });
+          break;
+        }
+        if (upload.owner !== ws) {
+          sendUploadStatus(ws, uploadId, 'error', { message: 'Upload owner mismatch' });
+          break;
+        }
+        if (msg.index !== upload.nextChunkIndex) {
+          sendUploadStatus(ws, uploadId, 'error', {
+            message: `Unexpected chunk index ${msg.index}, expected ${upload.nextChunkIndex}`,
+          });
+          break;
+        }
+        if (!msg.base64) {
+          sendUploadStatus(ws, uploadId, 'error', { message: 'Missing chunk payload' });
+          break;
+        }
+
+        try {
+          const chunk = Buffer.from(msg.base64, 'base64');
+          upload.chunks.push(chunk);
+          upload.receivedBytes += chunk.length;
+          upload.nextChunkIndex += 1;
+          upload.updatedAt = Date.now();
+          sendUploadStatus(ws, uploadId, 'uploading', {
+            chunkIndex: msg.index,
+            receivedBytes: upload.receivedBytes,
+            totalBytes: upload.totalBytes,
+          });
+        } catch (err) {
+          sendUploadStatus(ws, uploadId, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'image_upload_complete': {
+        const uploadId = String(msg.uploadId || '');
+        const upload = pendingImageUploads.get(uploadId);
+        if (!upload) {
+          sendUploadStatus(ws, uploadId, 'error', { message: 'Upload session not found' });
+          break;
+        }
+        if (upload.owner !== ws) {
+          sendUploadStatus(ws, uploadId, 'error', { message: 'Upload owner mismatch' });
+          break;
+        }
+        if (upload.nextChunkIndex !== upload.totalChunks) {
+          sendUploadStatus(ws, uploadId, 'error', {
+            message: `Upload incomplete (${upload.nextChunkIndex}/${upload.totalChunks})`,
+          });
+          break;
+        }
+
+        try {
+          const buffer = Buffer.concat(upload.chunks);
+          upload.tmpFile = createTempImageFile(buffer, upload.mediaType, uploadId);
+          upload.chunks = [];
+          upload.updatedAt = Date.now();
+          log(`Image pre-upload complete: ${upload.tmpFile} (${buffer.length} bytes)`);
+          sendUploadStatus(ws, uploadId, 'uploaded', {
+            receivedBytes: upload.receivedBytes,
+            totalBytes: upload.totalBytes,
+          });
+        } catch (err) {
+          sendUploadStatus(ws, uploadId, 'error', { message: err.message });
+          cleanupImageUpload(uploadId);
+        }
+        break;
+      }
+      case 'image_upload_abort': {
+        const uploadId = String(msg.uploadId || '');
+        if (uploadId) cleanupImageUpload(uploadId);
+        sendUploadStatus(ws, uploadId, 'aborted');
+        break;
+      }
+      case 'image_submit': {
+        const uploadId = String(msg.uploadId || '');
+        const upload = pendingImageUploads.get(uploadId);
+        if (!upload || !upload.tmpFile) {
+          sendUploadStatus(ws, uploadId, 'error', { message: 'Upload not ready' });
+          break;
+        }
+        try {
+          handlePreparedImageUpload({
+            tmpFile: upload.tmpFile,
+            mediaType: upload.mediaType,
+            text: msg.text || '',
+            logLabel: upload.name || uploadId,
+            onCleanup: () => cleanupImageUpload(uploadId),
+          });
+          sendUploadStatus(ws, uploadId, 'submitted');
+        } catch (err) {
+          sendUploadStatus(ws, uploadId, 'error', { message: err.message });
+          cleanupImageUpload(uploadId);
+        }
+        break;
+      }
       case 'image_upload': {
         handleImageUpload(msg);
         break;
       }
     }
+  });
+
+  ws.on('close', () => {
+    if (ws._legacyReplayTimer) {
+      clearTimeout(ws._legacyReplayTimer);
+      ws._legacyReplayTimer = null;
+    }
+    cleanupClientUploads(ws);
   });
 });
 
@@ -420,16 +668,18 @@ function fileLooksLikeTranscript(filePath) {
 
 function attachTranscript(target, startOffset = 0) {
   transcriptPath = target.full;
+  currentSessionId = path.basename(transcriptPath, '.jsonl');
   transcriptOffset = Math.max(0, startOffset);
   tailRemainder = Buffer.alloc(0);
   eventBuffer = [];
+  eventSeq = 0;
 
-  const sessionId = path.basename(transcriptPath, '.jsonl');
-  log(`Transcript attached: ${sessionId} (offset=${transcriptOffset})`);
+  log(`Transcript attached: ${currentSessionId} (offset=${transcriptOffset})`);
   broadcast({
     type: 'transcript_ready',
     transcript: transcriptPath,
-    sessionId,
+    sessionId: currentSessionId,
+    lastSeq: 0,
   });
 
   if (discoveryTimer) {
@@ -530,8 +780,9 @@ function startTailing() {
         if (!line) continue;
         try {
           const event = JSON.parse(line);
-          eventBuffer.push(event);
-          broadcast({ type: 'log_event', event });
+          const record = { seq: ++eventSeq, event };
+          eventBuffer.push(record);
+          broadcast({ type: 'log_event', seq: record.seq, event });
         } catch {
           // skip malformed lines
         }
@@ -552,6 +803,62 @@ function stopTailing() {
 // ============================================================
 //  5. Image Upload → Clipboard Injection
 // ============================================================
+function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', onCleanup = null }) {
+  if (!claudeProc) throw new Error('Claude not running');
+  if (!tmpFile || !fs.existsSync(tmpFile)) throw new Error('Prepared image file missing');
+
+  const isWin = process.platform === 'win32';
+  const isMac = process.platform === 'darwin';
+
+  try {
+    const stat = fs.statSync(tmpFile);
+    log(`Image ready: ${logLabel || path.basename(tmpFile)} (${stat.size} bytes)`);
+
+    if (isWin) {
+      const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
+      execSync(`powershell -NoProfile -STA -Command "${psCmd}"`, { timeout: 10000 });
+    } else if (isMac) {
+      execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as 芦class PNGf禄)'`, { timeout: 10000 });
+    } else {
+      try {
+        execSync(`xclip -selection clipboard -t image/png -i < "${tmpFile}"`, { timeout: 10000, shell: true });
+      } catch {
+        execSync(`wl-copy --type image/png < "${tmpFile}"`, { timeout: 10000, shell: true });
+      }
+    }
+    log('Clipboard set with image');
+
+    if (isWin) claudeProc.write('\x1bv');
+    else claudeProc.write('\x16');
+    log('Sent image paste keypress to PTY');
+
+    setTimeout(() => {
+      if (!claudeProc) return;
+      const trimmedText = (text || '').trim();
+      if (trimmedText) claudeProc.write(trimmedText);
+
+      setTimeout(() => {
+        if (claudeProc) claudeProc.write('\r');
+        log('Sent Enter after image paste' + (trimmedText ? ` + text: "${trimmedText.substring(0, 60)}"` : ''));
+
+        setTimeout(() => {
+          if (onCleanup) onCleanup();
+          else {
+            try { fs.unlinkSync(tmpFile); } catch {}
+          }
+        }, 5000);
+      }, 150);
+    }, 1000);
+  } catch (err) {
+    log(`Image upload error: ${err.message}`);
+    if (onCleanup) onCleanup();
+    else {
+      try { fs.unlinkSync(tmpFile); } catch {}
+    }
+    throw err;
+  }
+}
+
 function handleImageUpload(msg) {
   if (!claudeProc) {
     log('Image upload ignored: Claude not running');
@@ -562,13 +869,18 @@ function handleImageUpload(msg) {
     return;
   }
 
-  const isWin = process.platform === 'win32';
-  const isMac = process.platform === 'darwin';
-  const tmpDir = process.env.CLAUDE_CODE_TMPDIR || os.tmpdir();
-  const ext = (msg.mediaType || 'image/png').includes('jpeg') || (msg.mediaType || '').includes('jpg') ? '.jpg' : '.png';
-  const tmpFile = path.join(tmpDir, `bridge_upload_${Date.now()}${ext}`);
+  const buf = Buffer.from(msg.base64, 'base64');
+  const tmpFile = createTempImageFile(buf, msg.mediaType, `legacy_${Date.now()}`);
 
   try {
+    log(`Image saved: ${tmpFile} (${buf.length} bytes)`);
+    handlePreparedImageUpload({
+      tmpFile,
+      mediaType: msg.mediaType,
+      text: msg.text || '',
+    });
+    return;
+
     // 1. Write base64 to temp file
     const buf = Buffer.from(msg.base64, 'base64');
     fs.writeFileSync(tmpFile, buf);
@@ -576,8 +888,9 @@ function handleImageUpload(msg) {
 
     // 2. Set system clipboard to this image
     if (isWin) {
+      // -STA is critical: Clipboard API requires Single-Threaded Apartment mode
       const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
-      execSync(`powershell -NoProfile -Command "${psCmd}"`, { timeout: 10000 });
+      execSync(`powershell -NoProfile -STA -Command "${psCmd}"`, { timeout: 10000 });
     } else if (isMac) {
       execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as «class PNGf»)'`, { timeout: 10000 });
     } else {

@@ -10,6 +10,14 @@ const $ = id => document.getElementById(id);
 // ============================================================
 const STORAGE_KEY = 'claude_remote_servers';
 const LAST_KEY = 'claude_remote_last';
+const CHAT_CACHE_DB = 'claude_remote_chat_cache';
+const CHAT_CACHE_STORE = 'sessions';
+const CHAT_CACHE_MAX_SESSIONS = 8;
+const CHAT_CACHE_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
+const CHAT_CACHE_MAX_SESSION_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const IMAGE_CHUNK_BYTES = 96 * 1024;
+let chatCacheDbPromise = null;
 
 function getSavedServers() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; }
@@ -25,6 +33,116 @@ function saveServer(addr) {
 function removeServer(addr) {
   let list = getSavedServers().filter(a => a !== addr);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+}
+
+function openChatCacheDb() {
+  if (chatCacheDbPromise) return chatCacheDbPromise;
+  chatCacheDbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB unavailable'));
+      return;
+    }
+    const req = indexedDB.open(CHAT_CACHE_DB, 1);
+    req.onerror = () => reject(req.error || new Error('Failed to open chat cache'));
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(CHAT_CACHE_STORE)) {
+        const store = db.createObjectStore(CHAT_CACHE_STORE, { keyPath: 'cacheKey' });
+        store.createIndex('updatedAt', 'updatedAt', { unique: false });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+  }).catch(err => {
+    console.warn('[chat-cache]', err);
+    chatCacheDbPromise = null;
+    throw err;
+  });
+  return chatCacheDbPromise;
+}
+
+async function chatCacheRead(cacheKey) {
+  const db = await openChatCacheDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CHAT_CACHE_STORE, 'readonly');
+    const req = tx.objectStore(CHAT_CACHE_STORE).get(cacheKey);
+    req.onerror = () => reject(req.error || new Error('Failed to read chat cache'));
+    req.onsuccess = () => resolve(req.result || null);
+  });
+}
+
+async function chatCacheWrite(record) {
+  const db = await openChatCacheDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CHAT_CACHE_STORE, 'readwrite');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Failed to write chat cache'));
+    tx.objectStore(CHAT_CACHE_STORE).put(record);
+  });
+}
+
+async function chatCacheDelete(cacheKey) {
+  const db = await openChatCacheDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CHAT_CACHE_STORE, 'readwrite');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Failed to delete chat cache'));
+    tx.objectStore(CHAT_CACHE_STORE).delete(cacheKey);
+  });
+}
+
+async function chatCacheReadAll() {
+  const db = await openChatCacheDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CHAT_CACHE_STORE, 'readonly');
+    const req = tx.objectStore(CHAT_CACHE_STORE).getAll();
+    req.onerror = () => reject(req.error || new Error('Failed to list chat cache'));
+    req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+  });
+}
+
+function buildCacheKey(addr, sessionId) {
+  return `${addr}::${sessionId}`;
+}
+
+function estimateCacheBytes(record) {
+  const payload = JSON.stringify({
+    sessionId: record.sessionId || '',
+    serverAddr: record.serverAddr || '',
+    html: record.html || '',
+    seenUuids: Array.isArray(record.seenUuids) ? record.seenUuids : [],
+    todoTasks: Array.isArray(record.todoTasks) ? record.todoTasks : [],
+    todoPanelOpen: !!record.todoPanelOpen,
+    cwd: record.cwd || '',
+    model: record.model || '',
+    mode: record.mode || '',
+    lastSeq: record.lastSeq || 0,
+    updatedAt: record.updatedAt || 0,
+  });
+  return payload.length;
+}
+
+async function pruneChatCache() {
+  let records;
+  try {
+    records = await chatCacheReadAll();
+  } catch {
+    return;
+  }
+
+  records.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  let totalBytes = 0;
+  const removals = [];
+
+  records.forEach((record, idx) => {
+    const sizeBytes = Number.isFinite(record.sizeBytes) ? record.sizeBytes : estimateCacheBytes(record);
+    totalBytes += sizeBytes;
+    const overCount = idx >= CHAT_CACHE_MAX_SESSIONS;
+    const overTotal = totalBytes > CHAT_CACHE_MAX_TOTAL_BYTES;
+    const overSingle = sizeBytes > CHAT_CACHE_MAX_SESSION_BYTES;
+    if (overCount || overTotal || overSingle) removals.push(record.cacheKey);
+  });
+
+  await Promise.all(removals.map(cacheKey => chatCacheDelete(cacheKey).catch(() => {})));
 }
 
 function renderHistory() {
@@ -57,7 +175,7 @@ if (lastAddr) $('server-addr').value = lastAddr;
 renderHistory();
 
 let serverAddr = '';
-let pendingImage = null; // { base64, mediaType, name }
+let pendingImage = null; // { file, mediaType, name, previewUrl, uploadId, status, progress, ... }
 
 $('btn-connect').addEventListener('click', tryConnect);
 $('server-addr').addEventListener('keydown', e => {
@@ -99,6 +217,8 @@ function showApp() {
 // ============================================================
 const S = {
   ws: null,
+  sessionId: '',
+  lastSeq: 0,
   seenUuids: new Set(),
   messageMap: new Map(),
   toolMap: new Map(),
@@ -115,6 +235,10 @@ const S = {
   replaying: true,           // true during history replay, false after replay_done
   reconnectTimer: null,
   intentionalDisconnect: false,
+  resumeRequestedFor: '',
+  cacheSaveTimer: null,
+  sessionSyncToken: 0,
+  uploadWaiters: new Map(),
 };
 
 const $msgs = $('messages'), $chat = $('chat-area'), $input = $('input');
@@ -133,6 +257,220 @@ function showToast(text) {
   el.textContent = text;
   $('toast-container').appendChild(el);
   setTimeout(() => el.remove(), 3200);
+}
+
+function makeUploadId() {
+  return `upl_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function imageProgressLabel(image) {
+  if (!image) return '0%';
+  if (image.status === 'uploaded') return 'Done';
+  if (image.status === 'submitting') return 'Send';
+  if (image.status === 'failed') return 'Retry';
+  return `${Math.max(0, Math.min(100, Math.round((image.progress || 0) * 100)))}%`;
+}
+
+function updateImagePreviewUi() {
+  const preview = $('image-preview');
+  const img = $('image-preview-img');
+  const overlay = $('image-upload-overlay');
+  const ring = $('image-upload-ring');
+  const text = $('image-upload-text');
+  const removeBtn = $('image-preview-remove');
+
+  if (!pendingImage) {
+    preview.classList.add('hidden');
+    img.src = '';
+    overlay.classList.add('hidden');
+    text.textContent = '0%';
+    ring.style.strokeDashoffset = '97.4';
+    removeBtn.disabled = false;
+    return;
+  }
+
+  preview.classList.remove('hidden');
+  img.src = pendingImage.previewUrl || '';
+  removeBtn.disabled = pendingImage.status === 'submitting';
+
+  const showOverlay = pendingImage.status === 'uploading' || pendingImage.status === 'uploaded' ||
+    pendingImage.status === 'submitting' || pendingImage.status === 'failed';
+  overlay.classList.toggle('hidden', !showOverlay);
+  text.textContent = imageProgressLabel(pendingImage);
+  ring.style.strokeDashoffset = String(97.4 * (1 - Math.max(0, Math.min(1, pendingImage.progress || 0))));
+}
+
+function clearUploadWaiter(uploadId, err = null) {
+  const waiter = S.uploadWaiters.get(uploadId);
+  if (!waiter) return;
+  S.uploadWaiters.delete(uploadId);
+  if (err) waiter.reject(err);
+  else waiter.resolve();
+}
+
+function waitForUploadStatus(uploadId, expectedStatuses, matchFn) {
+  return new Promise((resolve, reject) => {
+    S.uploadWaiters.set(uploadId, {
+      expectedStatuses: new Set(expectedStatuses),
+      matchFn,
+      resolve,
+      reject,
+    });
+  });
+}
+
+function handleUploadStatus(m) {
+  if (pendingImage && m.uploadId === pendingImage.uploadId) {
+    if (Number.isFinite(m.totalBytes) && m.totalBytes > 0) pendingImage.totalBytes = m.totalBytes;
+    if (Number.isFinite(m.receivedBytes)) pendingImage.uploadedBytes = m.receivedBytes;
+    const totalBytes = pendingImage.totalBytes || 0;
+    if (totalBytes > 0 && Number.isFinite(pendingImage.uploadedBytes)) {
+      pendingImage.progress = Math.max(0, Math.min(1, pendingImage.uploadedBytes / totalBytes));
+    }
+    if (m.status === 'ready_for_chunks' || m.status === 'uploading') pendingImage.status = 'uploading';
+    else if (m.status === 'uploaded') {
+      pendingImage.status = 'uploaded';
+      pendingImage.progress = 1;
+    } else if (m.status === 'submitted') {
+      pendingImage.status = 'submitted';
+      pendingImage.progress = 1;
+    } else if (m.status === 'error' || m.status === 'aborted') {
+      pendingImage.status = 'failed';
+    }
+    updateImagePreviewUi();
+  }
+
+  const waiter = S.uploadWaiters.get(m.uploadId);
+  if (!waiter) return;
+  if (m.status === 'error' || m.status === 'aborted') {
+    S.uploadWaiters.delete(m.uploadId);
+    waiter.reject(new Error(m.message || 'Image upload failed'));
+    return;
+  }
+  if (!waiter.expectedStatuses.has(m.status)) return;
+  if (waiter.matchFn && !waiter.matchFn(m)) return;
+  S.uploadWaiters.delete(m.uploadId);
+  waiter.resolve(m);
+}
+
+function clearPendingImage({ abortUpload = true } = {}) {
+  if (pendingImage && abortUpload && pendingImage.uploadId && S.ws && S.ws.readyState === WebSocket.OPEN &&
+      pendingImage.status !== 'submitted') {
+    S.ws.send(JSON.stringify({ type: 'image_upload_abort', uploadId: pendingImage.uploadId }));
+  }
+  if (pendingImage?.previewUrl) {
+    try { URL.revokeObjectURL(pendingImage.previewUrl); } catch {}
+  }
+  pendingImage = null;
+  updateImagePreviewUi();
+  updateSendBtn();
+}
+
+function fileChunkToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image chunk'));
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const commaIdx = result.indexOf(',');
+      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onerror = () => {
+      try { URL.revokeObjectURL(objectUrl); } catch {}
+      reject(new Error('Failed to decode image preview'));
+    };
+    img.onload = () => {
+      try {
+        const maxW = 480;
+        const maxH = 320;
+        const scale = Math.min(1, maxW / img.width, maxH / img.height);
+        const width = Math.max(1, Math.round(img.width * scale));
+        const height = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Canvas unavailable');
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      } catch (err) {
+        reject(err);
+      } finally {
+        try { URL.revokeObjectURL(objectUrl); } catch {}
+      }
+    };
+    img.src = objectUrl;
+  });
+}
+
+async function submitPendingImageUpload() {
+  if (!pendingImage || !pendingImage.submitQueued || pendingImage.status !== 'uploaded') return;
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) throw new Error('Connection lost');
+
+  const uploadId = pendingImage.uploadId;
+  pendingImage.status = 'submitting';
+  updateImagePreviewUi();
+  const waitForSubmitted = waitForUploadStatus(uploadId, ['submitted']);
+  S.ws.send(JSON.stringify({
+    type: 'image_submit',
+    uploadId,
+    text: pendingImage.queuedText || '',
+  }));
+  await waitForSubmitted;
+  clearPendingImage({ abortUpload: false });
+}
+
+async function startImageUpload(image) {
+  if (!image || !S.ws || S.ws.readyState !== WebSocket.OPEN) {
+    throw new Error('Connection unavailable');
+  }
+
+  image.status = 'uploading';
+  image.progress = 0;
+  image.uploadedBytes = 0;
+  updateImagePreviewUi();
+
+  const totalChunks = Math.max(1, Math.ceil(image.file.size / IMAGE_CHUNK_BYTES));
+  let waitForStatus = waitForUploadStatus(image.uploadId, ['ready_for_chunks']);
+  S.ws.send(JSON.stringify({
+    type: 'image_upload_init',
+    uploadId: image.uploadId,
+    totalBytes: image.file.size,
+    totalChunks,
+    mediaType: image.mediaType,
+    name: image.name,
+  }));
+  await waitForStatus;
+
+  for (let index = 0; index < totalChunks; index++) {
+    const start = index * IMAGE_CHUNK_BYTES;
+    const end = Math.min(image.file.size, start + IMAGE_CHUNK_BYTES);
+    const base64 = await fileChunkToBase64(image.file.slice(start, end));
+    waitForStatus = waitForUploadStatus(image.uploadId, ['uploading'], msg => msg.chunkIndex === index);
+    S.ws.send(JSON.stringify({
+      type: 'image_upload_chunk',
+      uploadId: image.uploadId,
+      index,
+      base64,
+    }));
+    await waitForStatus;
+  }
+
+  waitForStatus = waitForUploadStatus(image.uploadId, ['uploaded']);
+  S.ws.send(JSON.stringify({ type: 'image_upload_complete', uploadId: image.uploadId }));
+  await waitForStatus;
+
+  if (pendingImage && pendingImage.uploadId === image.uploadId && pendingImage.submitQueued) {
+    await submitPendingImageUpload();
+  }
 }
 
 function renderMd(text) {
@@ -217,6 +555,217 @@ function shortenPath(p) {
   const parts = p.replace(/\\/g, '/').replace(/\/$/, '').split('/');
   if (parts.length <= 2) return parts.join('/');
   return parts.slice(-2).join('/');
+}
+
+function getWelcomeMarkup() {
+  return `<div class="welcome" id="welcome">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+    <h2>Claude Remote Control</h2>
+    <p>Connected. Send a message below to start.</p>
+  </div>`;
+}
+
+function clearConversationUi() {
+  if (S.cacheSaveTimer) {
+    clearTimeout(S.cacheSaveTimer);
+    S.cacheSaveTimer = null;
+  }
+  for (const [uploadId, waiter] of S.uploadWaiters) {
+    waiter.reject(new Error('Upload reset'));
+    S.uploadWaiters.delete(uploadId);
+  }
+  S.seenUuids.clear();
+  S.messageMap.clear();
+  S.toolMap.clear();
+  S.currentGroup = null;
+  S.currentGroupCount = 0;
+  S.isAtBottom = true;
+  S.waiting = false;
+  S.thinkingEl = null;
+  S.waitStartedAt = 0;
+  S.lastSeq = 0;
+  S.pendingPerms = [];
+  resetTodoState();
+  clearPendingImage({ abortUpload: false });
+  $msgs.innerHTML = getWelcomeMarkup();
+  $('input-area').classList.remove('waiting');
+  $input.disabled = false;
+  $('btn-send').disabled = false;
+  $input.placeholder = INPUT_PLACEHOLDER_DEFAULT;
+  updateSendBtn();
+  updateScrollBtn();
+  setConnBanner(false);
+  $('perm-overlay').classList.remove('visible');
+}
+
+function bindToolToggle(item, detail) {
+  if (!item || !detail || item.dataset.boundClick === '1') return;
+  item.dataset.boundClick = '1';
+  item.addEventListener('click', () => detail.classList.toggle('open'));
+}
+
+function rebuildRuntimeStateFromDom() {
+  S.messageMap.clear();
+  S.toolMap.clear();
+  S.currentGroup = null;
+  S.currentGroupCount = 0;
+
+  $msgs.querySelectorAll('[data-message-id]').forEach(el => {
+    if (el.dataset.messageId) S.messageMap.set(el.dataset.messageId, el);
+  });
+
+  $msgs.querySelectorAll('.step-item[data-tool-id]').forEach(item => {
+    const toolId = item.dataset.toolId;
+    if (!toolId) return;
+    const detail = document.getElementById(`detail-${toolId}`);
+    bindToolToggle(item, detail);
+    S.toolMap.set(toolId, {
+      item,
+      detail,
+      name: item.dataset.toolName || '',
+      group: item.closest('.step-group'),
+    });
+  });
+
+  const lastChild = $msgs.lastElementChild;
+  if (lastChild && lastChild.classList.contains('step-group')) {
+    S.currentGroup = lastChild;
+    S.currentGroupCount = lastChild.querySelectorAll('.step-item').length;
+  }
+}
+
+function getTodoSnapshot() {
+  return {
+    tasks: Array.from(todoState.tasks.entries()),
+    panelOpen: todoState.panelOpen,
+  };
+}
+
+function restoreTodoSnapshot(snapshot) {
+  resetTodoState();
+  if (!snapshot || !Array.isArray(snapshot.tasks) || snapshot.tasks.length === 0) return;
+  snapshot.tasks.forEach(([taskId, task]) => {
+    todoState.tasks.set(String(taskId), task);
+  });
+  todoState.panelOpen = !!snapshot.panelOpen;
+  renderTodoPanel();
+  $('todo-panel').classList.toggle('open', todoState.panelOpen && todoState.tasks.size > 0);
+}
+
+async function restoreSessionCache(sessionId) {
+  if (!serverAddr || !sessionId) return false;
+
+  let record;
+  try {
+    record = await chatCacheRead(buildCacheKey(serverAddr, sessionId));
+  } catch {
+    return false;
+  }
+  if (!record || !record.html) return false;
+
+  $msgs.innerHTML = record.html;
+  S.seenUuids = new Set(Array.isArray(record.seenUuids) ? record.seenUuids : []);
+  S.lastSeq = Number.isInteger(record.lastSeq) ? record.lastSeq : 0;
+  S.cwd = record.cwd || S.cwd;
+  S.model = record.model || '';
+  S.mode = record.mode || S.mode;
+  restoreTodoSnapshot({
+    tasks: Array.isArray(record.todoTasks) ? record.todoTasks : [],
+    panelOpen: !!record.todoPanelOpen,
+  });
+  rebuildRuntimeStateFromDom();
+  removeThinkingIndicator();
+  $input.disabled = false;
+  $('btn-send').disabled = false;
+  $('input-area').classList.remove('waiting');
+  $input.placeholder = INPUT_PLACEHOLDER_DEFAULT;
+  updateHeaderInfo();
+  updateSendBtn();
+  updateScrollBtn();
+  requestAnimationFrame(() => { $chat.scrollTop = $chat.scrollHeight; });
+  return true;
+}
+
+async function persistSessionCache() {
+  if (!serverAddr || !S.sessionId) return;
+  const todoSnapshot = getTodoSnapshot();
+  const record = {
+    cacheKey: buildCacheKey(serverAddr, S.sessionId),
+    serverAddr,
+    sessionId: S.sessionId,
+    html: $msgs.innerHTML,
+    seenUuids: Array.from(S.seenUuids),
+    todoTasks: todoSnapshot.tasks,
+    todoPanelOpen: todoSnapshot.panelOpen,
+    cwd: S.cwd,
+    model: S.model,
+    mode: S.mode,
+    lastSeq: S.lastSeq,
+    updatedAt: Date.now(),
+  };
+  record.sizeBytes = estimateCacheBytes(record);
+
+  try {
+    if (record.sizeBytes > CHAT_CACHE_MAX_SESSION_BYTES) {
+      await chatCacheDelete(record.cacheKey).catch(() => {});
+      return;
+    }
+    await chatCacheWrite(record);
+    await pruneChatCache();
+  } catch (err) {
+    console.warn('[chat-cache]', err);
+  }
+}
+
+function scheduleSessionCacheSave() {
+  if (!serverAddr || !S.sessionId) return;
+  if (S.cacheSaveTimer) clearTimeout(S.cacheSaveTimer);
+  S.cacheSaveTimer = setTimeout(async () => {
+    S.cacheSaveTimer = null;
+    await persistSessionCache();
+  }, 250);
+}
+
+function hasOptimisticBubble() {
+  return !!$msgs.querySelector('[data-optimistic]');
+}
+
+async function syncSessionState(sessionId, serverLastSeq) {
+  const syncToken = ++S.sessionSyncToken;
+  const prevSessionId = S.sessionId;
+  const nextSessionId = sessionId || '';
+  const sessionChanged = nextSessionId !== prevSessionId;
+  S.replaying = true;
+
+  if (sessionChanged) {
+    S.sessionId = nextSessionId;
+    S.model = '';
+    const shouldKeepOptimisticUi = !prevSessionId && hasOptimisticBubble();
+    if (shouldKeepOptimisticUi) {
+      rebuildRuntimeStateFromDom();
+      updateHeaderInfo();
+      scheduleSessionCacheSave();
+    } else {
+      clearConversationUi();
+    }
+    if (nextSessionId && !shouldKeepOptimisticUi) {
+      const restored = await restoreSessionCache(nextSessionId);
+      if (!restored) updateHeaderInfo();
+    }
+  }
+
+  if (syncToken !== S.sessionSyncToken) return;
+
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  if (S.resumeRequestedFor === nextSessionId) return;
+
+  S.resumeRequestedFor = nextSessionId;
+  S.ws.send(JSON.stringify({
+    type: 'resume',
+    sessionId: nextSessionId || null,
+    lastSeq: nextSessionId ? S.lastSeq : 0,
+    serverLastSeq: Number.isInteger(serverLastSeq) ? serverLastSeq : null,
+  }));
 }
 
 function formatModel(m) {
@@ -428,9 +977,10 @@ function isCurrentWaitingTurnEvent(evt) {
   return true;
 }
 
-function processEvent(evt) {
+function processEvent(evt, seq) {
   try {
     if (!evt) return;
+    if (Number.isInteger(seq) && seq > S.lastSeq) S.lastSeq = seq;
     if (S.seenUuids.has(evt.uuid)) return;
     if (evt.uuid) S.seenUuids.add(evt.uuid);
     removeWelcome();
@@ -470,6 +1020,7 @@ function processEvent(evt) {
       if (isCurrentTurn && isAssistantTurnDone(evt)) setWaiting(false);
     }
     scrollEnd();
+    scheduleSessionCacheSave();
   } catch (e) {
     console.error('[processEvent]', e);
   }
@@ -479,6 +1030,33 @@ function processEvent(evt) {
 function renderUser(evt) {
   const c = evt.message.content;
   if (Array.isArray(c)) {
+    const imageBlocks = c.filter(b => b && b.type === 'image');
+    const textBlocks = c.filter(b => b && b.type === 'text' && b.text);
+    if (imageBlocks.length > 0 || textBlocks.length > 0) {
+      closeGroup();
+      const opt = $msgs.querySelector('[data-optimistic]');
+      if (opt) { opt.removeAttribute('data-optimistic'); return; }
+
+      const el = document.createElement('div');
+      el.className = 'user-msg';
+      let html = '';
+      if (imageBlocks.length > 0) {
+        html += imageBlocks.map(block => {
+          const source = block.source && block.source.type === 'base64' ? block.source : null;
+          if (!source || !source.data) return '';
+          const mediaType = source.media_type || 'image/png';
+          return `<img src="data:${mediaType};base64,${source.data}" style="max-width:200px;max-height:120px;border-radius:8px;display:block;margin-bottom:${textBlocks.length ? '6px' : '0'}">`;
+        }).join('');
+      }
+      if (textBlocks.length > 0) {
+        html += textBlocks.map(block => esc(block.text).replace(/\n/g, '<br>')).join('<br>');
+      }
+      if (html) {
+        el.innerHTML = html;
+        $msgs.appendChild(el);
+      }
+      return;
+    }
     for (const b of c) {
       if (b.type === 'tool_result') {
         handleTodoToolResult(b, evt);
@@ -582,6 +1160,7 @@ function renderText(text, msgId) {
   if (!el) {
     el = document.createElement('div');
     el.className = 'assistant-text';
+    if (msgId) el.dataset.messageId = msgId;
     S.messageMap.set(msgId, el);
     $msgs.appendChild(el);
   }
@@ -614,6 +1193,8 @@ function renderTool(b) {
   const desc = toolDesc(b.name, b.input);
   const item = document.createElement('div');
   item.className = 'step-item loading';
+  item.dataset.toolId = b.id || '';
+  item.dataset.toolName = b.name || '';
   item.innerHTML = `
     <div class="step-icon">${iconFor(b.name)}</div>
     <span class="step-name">${esc(b.name)}</span>
@@ -639,7 +1220,7 @@ function renderTool(b) {
     `;
   }
 
-  item.addEventListener('click', () => detail.classList.toggle('open'));
+  bindToolToggle(item, detail);
   list.appendChild(item);
   list.appendChild(detail);
 
@@ -863,14 +1444,12 @@ $('btn-scroll').addEventListener('click', () => { $chat.scrollTop = $chat.scroll
 // ============================================================
 //  Image Upload
 // ============================================================
-const MAX_IMAGE_SIZE = 4 * 1024 * 1024; // 4MB limit for base64
-
 $('btn-image').addEventListener('click', () => {
   if (S.waiting) return;
   $('image-file-input').click();
 });
 
-$('image-file-input').addEventListener('change', (e) => {
+$('image-file-input').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   e.target.value = ''; // reset so same file can be re-selected
@@ -880,33 +1459,51 @@ $('image-file-input').addEventListener('change', (e) => {
     return;
   }
 
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result;
-    // dataUrl = "data:image/png;base64,xxxx..."
-    const base64 = dataUrl.split(',')[1];
-    if (base64.length > MAX_IMAGE_SIZE) {
-      showToast('Image too large (max 4MB)');
-      return;
-    }
-    const mediaType = dataUrl.split(';')[0].split(':')[1]; // e.g. "image/png"
-    pendingImage = { base64, mediaType, name: file.name };
+  if (file.size > MAX_IMAGE_BYTES) {
+    showToast('Image too large (max 4MB)');
+    return;
+  }
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) {
+    showToast('Connection unavailable');
+    return;
+  }
 
-    // Show preview
-    $('image-preview-img').src = dataUrl;
-    $('image-preview').classList.remove('hidden');
-    updateSendBtn();
+  clearPendingImage();
+  const previewUrl = await fileToDataUrl(file);
+  pendingImage = {
+    file,
+    mediaType: file.type || 'image/png',
+    name: file.name,
+    previewUrl,
+    uploadId: makeUploadId(),
+    status: 'uploading',
+    progress: 0,
+    uploadedBytes: 0,
+    totalBytes: file.size,
+    submitQueued: false,
+    queuedText: '',
   };
-  reader.readAsDataURL(file);
+  updateImagePreviewUi();
+  updateSendBtn();
+
+  try {
+    await startImageUpload(pendingImage);
+  } catch (err) {
+    if (pendingImage) {
+      const wasQueued = pendingImage.submitQueued;
+      pendingImage.status = 'failed';
+      updateImagePreviewUi();
+      if (wasQueued && S.waiting) setWaiting(false);
+    }
+    showToast(err.message || 'Image upload failed');
+  }
 });
 
 $('image-preview-remove').addEventListener('click', () => {
-  pendingImage = null;
-  $('image-preview').classList.add('hidden');
-  $('image-preview-img').src = '';
-  updateSendBtn();
+  clearPendingImage();
 });
 
+updateImagePreviewUi();
 updateSendBtn();
 
 // Back button — disconnect and return to connect screen
@@ -920,40 +1517,18 @@ $('btn-back').addEventListener('click', () => {
 
 function resetAppState() {
   S.ws = null;
-  S.seenUuids.clear();
-  S.messageMap.clear();
-  S.toolMap.clear();
-  S.currentGroup = null;
-  S.currentGroupCount = 0;
-  S.isAtBottom = true;
-  S.waiting = false;
-  S.thinkingEl = null;
+  S.sessionId = '';
+  S.resumeRequestedFor = '';
+  S.sessionSyncToken = 0;
   S.cwd = '';
   S.model = '';
   S.mode = 'default';
   S.pendingPerms = [];
-  S.waitStartedAt = 0;
   S.replaying = true;
   S.intentionalDisconnect = false;
-  // Clear pending image
-  pendingImage = null;
-  $('image-preview').classList.add('hidden');
-  $('image-preview-img').src = '';
-  resetTodoState();
-  // Reset UI — use id="welcome" so getWelcome() can find it
-  $msgs.innerHTML = `<div class="welcome" id="welcome">
-    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
-    <h2>Claude Remote Control</h2>
-    <p>Connected. Send a message below to start.</p>
-  </div>`;
-  $('input-area').classList.remove('waiting');
-  $input.disabled = false;
-  $('btn-send').disabled = false;
-  $input.placeholder = INPUT_PLACEHOLDER_DEFAULT;
+  clearConversationUi();
   $input.value = '';
-  updateSendBtn();
   updateHeaderInfo();
-  setConnBanner(false);
   $('perm-overlay').classList.remove('visible');
 }
 
@@ -975,31 +1550,38 @@ function send() {
   el.className = 'user-msg'; el.dataset.optimistic = '1';
   let html = '';
   if (hasImage) {
-    html += `<img src="data:${pendingImage.mediaType};base64,${pendingImage.base64}" style="max-width:200px;max-height:120px;border-radius:8px;display:block;margin-bottom:${t ? '6px' : '0'}">`;
+    if (pendingImage.status === 'failed') {
+      showToast('Image upload failed. Re-select the image and try again.');
+      return;
+    }
+    html += `<img src="${pendingImage.previewUrl}" style="max-width:200px;max-height:120px;border-radius:8px;display:block;margin-bottom:${t ? '6px' : '0'}">`;
   }
   if (t) html += esc(t).replace(/\n/g, '<br>');
   el.innerHTML = html;
   $msgs.appendChild(el);
   S.isAtBottom = true; scrollEnd();
+  scheduleSessionCacheSave();
 
-  // Send image first, then text
   if (hasImage) {
-    S.ws.send(JSON.stringify({
-      type: 'image_upload',
-      base64: pendingImage.base64,
-      mediaType: pendingImage.mediaType,
-      name: pendingImage.name,
-      text: t || '',
-    }));
-    pendingImage = null;
-    $('image-preview').classList.add('hidden');
-    $('image-preview-img').src = '';
+    pendingImage.submitQueued = true;
+    pendingImage.queuedText = t || '';
   } else {
     S.ws.send(JSON.stringify({ type: 'chat', text: t }));
   }
 
   $input.value = ''; $input.style.height = 'auto';
   setWaiting(true);
+
+  if (hasImage && pendingImage.status === 'uploaded') {
+    submitPendingImageUpload().catch(err => {
+      if (pendingImage) {
+        pendingImage.status = 'failed';
+        updateImagePreviewUi();
+      }
+      setWaiting(false);
+      showToast(err.message || 'Image submit failed');
+    });
+  }
 }
 
 // ============================================================
@@ -1017,6 +1599,8 @@ function connect() {
     return;
   }
   S.ws = ws;
+  S.resumeRequestedFor = '';
+  S.replaying = true;
 
   const connectTimeout = setTimeout(() => {
     if (ws.readyState !== WebSocket.OPEN) {
@@ -1036,17 +1620,27 @@ function connect() {
     ws.send(JSON.stringify({ type: 'set_approval_mode', mode: approvalMode }));
   };
 
-  ws.onmessage = e => {
+  ws.onmessage = async e => {
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
     try {
       if (m.type === 'pty_output') { /* ignored — no terminal panel */ }
-      else if (m.type === 'log_event') processEvent(m.event);
-      else if (m.type === 'transcript_ready') { setStatus('connected'); }
-      else if (m.type === 'replay_done') { S.replaying = false; }
+      else if (m.type === 'log_event') processEvent(m.event, m.seq);
+      else if (m.type === 'image_upload_status') handleUploadStatus(m);
+      else if (m.type === 'transcript_ready') {
+        setStatus('connected');
+        await syncSessionState(m.sessionId, m.lastSeq);
+      }
+      else if (m.type === 'replay_done') {
+        if (m.sessionId !== undefined && m.sessionId !== null) S.sessionId = m.sessionId;
+        if (Number.isInteger(m.lastSeq) && m.lastSeq > S.lastSeq) S.lastSeq = m.lastSeq;
+        S.replaying = false;
+        scheduleSessionCacheSave();
+      }
       else if (m.type === 'status') {
         setStatus(m.status === 'running' ? 'connected' : 'starting');
         if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
+        if ('sessionId' in m) await syncSessionState(m.sessionId, m.lastSeq);
       }
       else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
       else if (m.type === 'permission_request') showPermission(m);
@@ -1056,6 +1650,7 @@ function connect() {
       }
       else if (m.type === 'mode') {
         S.mode = m.mode; updateHeaderInfo();
+        scheduleSessionCacheSave();
       }
     } catch (err) {
       console.error('[ws.onmessage]', err);
@@ -1065,6 +1660,16 @@ function connect() {
   ws.onclose = () => {
     clearTimeout(connectTimeout);
     setStatus('disconnected');
+    S.resumeRequestedFor = '';
+    for (const [uploadId, waiter] of S.uploadWaiters) {
+      waiter.reject(new Error('Connection lost'));
+      S.uploadWaiters.delete(uploadId);
+    }
+    if (pendingImage && pendingImage.status !== 'submitted') {
+      pendingImage.status = 'failed';
+      updateImagePreviewUi();
+      if (S.waiting) setWaiting(false);
+    }
     if (S.intentionalDisconnect) return;
 
     if (!$('app').classList.contains('hidden')) {
@@ -1508,6 +2113,7 @@ function toggleTodoPanel() {
   const panel = $('todo-panel');
   todoState.panelOpen = !todoState.panelOpen;
   panel.classList.toggle('open', todoState.panelOpen);
+  scheduleSessionCacheSave();
 }
 
 function resetTodoState() {

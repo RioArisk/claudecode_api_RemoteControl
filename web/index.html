@@ -962,6 +962,8 @@ header {
 // ============================================================
 const S = {
   ws: null,
+  sessionId: '',
+  lastSeq: 0,
   seenUuids: new Set(),
   messageMap: new Map(),
   toolMap: new Map(),       // tool_use id → { el, name, groupEl }
@@ -975,6 +977,7 @@ const S = {
   mode: 'default',          // permission mode
   pendingPerms: [],          // queue of permission requests [{id, toolName, toolInput}]
   replaying: true,           // true during history replay, false after replay_done
+  resumeRequestedFor: '',
 };
 
 const $ = id => document.getElementById(id);
@@ -1021,6 +1024,36 @@ function scrollEnd() {
 }
 
 function removeWelcome() { if ($welcome && $welcome.parentNode) $welcome.remove(); }
+
+function clearConversationState() {
+  S.seenUuids.clear();
+  S.messageMap.clear();
+  S.toolMap.clear();
+  S.currentGroup = null;
+  S.currentGroupCount = 0;
+  S.waiting = false;
+  S.lastSeq = 0;
+  removeThinkingIndicator();
+  $msgs.innerHTML = '';
+}
+
+function syncSessionState(sessionId, serverLastSeq) {
+  const nextSessionId = sessionId || '';
+  if (nextSessionId !== S.sessionId) {
+    S.sessionId = nextSessionId;
+    clearConversationState();
+  }
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  if (S.resumeRequestedFor === nextSessionId) return;
+  S.resumeRequestedFor = nextSessionId;
+  S.replaying = true;
+  S.ws.send(JSON.stringify({
+    type: 'resume',
+    sessionId: nextSessionId || null,
+    lastSeq: nextSessionId ? S.lastSeq : 0,
+    serverLastSeq: Number.isInteger(serverLastSeq) ? serverLastSeq : null,
+  }));
+}
 
 // ============================================================
 //  Waiting / Thinking indicator
@@ -1186,7 +1219,8 @@ function isJunkContent(content) {
   return JUNK_PATTERNS.some(p => p.test(t));
 }
 
-function processEvent(evt) {
+function processEvent(evt, seq) {
+  if (Number.isInteger(seq) && seq > S.lastSeq) S.lastSeq = seq;
   if (S.seenUuids.has(evt.uuid)) return;
   if (evt.uuid) S.seenUuids.add(evt.uuid);
   removeWelcome();
@@ -1624,6 +1658,7 @@ function send() {
 // ============================================================
 function connect() {
   S.replaying = true;
+  S.resumeRequestedFor = '';
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
   S.ws = ws;
   ws.onopen = () => {
@@ -1634,12 +1669,17 @@ function connect() {
   ws.onmessage = e => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.type === 'pty_output') { /* ignored – terminal panel removed */ }
-    else if (m.type === 'log_event') processEvent(m.event);
-    else if (m.type === 'transcript_ready') { setStatus('connected'); }
-    else if (m.type === 'replay_done') { S.replaying = false; }
+    else if (m.type === 'log_event') processEvent(m.event, m.seq);
+    else if (m.type === 'transcript_ready') { setStatus('connected'); syncSessionState(m.sessionId, m.lastSeq); }
+    else if (m.type === 'replay_done') {
+      if (m.sessionId !== undefined && m.sessionId !== null) S.sessionId = m.sessionId;
+      if (Number.isInteger(m.lastSeq) && m.lastSeq > S.lastSeq) S.lastSeq = m.lastSeq;
+      S.replaying = false;
+    }
     else if (m.type === 'status') {
       setStatus(m.status === 'running' ? 'connected' : 'starting');
       if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
+      if ('sessionId' in m) syncSessionState(m.sessionId, m.lastSeq);
     }
     else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
     else if (m.type === 'permission_request') showPermission(m);
@@ -1651,7 +1691,7 @@ function connect() {
       S.mode = m.mode; updateHeaderInfo();
     }
   };
-  ws.onclose = () => { setStatus('disconnected'); setConnBanner(true, true); setTimeout(connect, 2000); };
+  ws.onclose = () => { S.resumeRequestedFor = ''; setStatus('disconnected'); setConnBanner(true, true); setTimeout(connect, 2000); };
   ws.onerror = () => {};
 }
 
