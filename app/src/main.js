@@ -650,6 +650,11 @@ function clearConversationUi() {
   S.waitStartedAt = 0;
   S.lastSeq = 0;
   S.pendingPerms = [];
+  questionQueue = [];
+  currentQuestions = null;
+  currentQuestionIdx = 0;
+  $('question-overlay').classList.remove('visible');
+  $('plan-overlay').classList.remove('visible');
   resetTodoState();
   clearPendingImage({ abortUpload: false });
   $msgs.innerHTML = getWelcomeMarkup();
@@ -663,9 +668,6 @@ function clearConversationUi() {
   $('perm-overlay').classList.remove('visible');
 }
 
-function bindToolToggle(item, detail) {
-  // handled by delegated click on $msgs
-}
 
 function rebuildRuntimeStateFromDom() {
   S.messageMap.clear();
@@ -681,7 +683,6 @@ function rebuildRuntimeStateFromDom() {
     const toolId = item.dataset.toolId;
     if (!toolId) return;
     const detail = document.getElementById(`detail-${toolId}`);
-    bindToolToggle(item, detail);
     S.toolMap.set(toolId, {
       item,
       detail,
@@ -1362,7 +1363,6 @@ function renderTool(b) {
     `;
   }
 
-  bindToolToggle(item, detail);
   list.appendChild(item);
   list.appendChild(detail);
 

@@ -19,6 +19,7 @@ let currentSessionId = null;
 let transcriptOffset = 0;
 let eventBuffer = [];
 let eventSeq = 0;
+const EVENT_BUFFER_MAX = 5000;
 let tailTimer = null;
 let discoveryTimer = null;
 let preExistingFiles = new Set();
@@ -782,6 +783,9 @@ function startTailing() {
           const event = JSON.parse(line);
           const record = { seq: ++eventSeq, event };
           eventBuffer.push(record);
+          if (eventBuffer.length > EVENT_BUFFER_MAX) {
+            eventBuffer = eventBuffer.slice(-Math.round(EVENT_BUFFER_MAX * 0.8));
+          }
           broadcast({ type: 'log_event', seq: record.seq, event });
         } catch {
           // skip malformed lines
@@ -879,60 +883,6 @@ function handleImageUpload(msg) {
       mediaType: msg.mediaType,
       text: msg.text || '',
     });
-    return;
-
-    // 1. Write base64 to temp file
-    const buf = Buffer.from(msg.base64, 'base64');
-    fs.writeFileSync(tmpFile, buf);
-    log(`Image saved: ${tmpFile} (${buf.length} bytes)`);
-
-    // 2. Set system clipboard to this image
-    if (isWin) {
-      // -STA is critical: Clipboard API requires Single-Threaded Apartment mode
-      const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
-      execSync(`powershell -NoProfile -STA -Command "${psCmd}"`, { timeout: 10000 });
-    } else if (isMac) {
-      execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as «class PNGf»)'`, { timeout: 10000 });
-    } else {
-      // Linux: try xclip then wl-copy
-      try {
-        execSync(`xclip -selection clipboard -t image/png -i < "${tmpFile}"`, { timeout: 10000, shell: true });
-      } catch {
-        execSync(`wl-copy --type image/png < "${tmpFile}"`, { timeout: 10000, shell: true });
-      }
-    }
-    log('Clipboard set with image');
-
-    // 3. Strategy: paste image first (Alt+V / Ctrl+V), then type text, then Enter
-    //    Claude Code appends [Image #N] to the current input on paste keypress,
-    //    so we paste first, type text after, then submit with Enter.
-
-    // Send Alt+V (Windows) or Ctrl+V (macOS/Linux) to trigger Claude's image paste
-    if (isWin) {
-      claudeProc.write('\x1bv'); // Alt+V = ESC + v
-    } else {
-      claudeProc.write('\x16'); // Ctrl+V
-    }
-    log('Sent image paste keypress to PTY');
-
-    // After paste is processed, type text if any, then press Enter
-    setTimeout(() => {
-      if (!claudeProc) return;
-      const text = (msg.text || '').trim();
-      if (text) {
-        claudeProc.write(text);
-      }
-      setTimeout(() => {
-        if (claudeProc) claudeProc.write('\r');
-        log('Sent Enter after image paste' + (text ? ` + text: "${text.substring(0, 60)}"` : ''));
-
-        // Clean up temp file after a delay
-        setTimeout(() => {
-          try { fs.unlinkSync(tmpFile); } catch {}
-        }, 5000);
-      }, 150);
-    }, 1000); // Wait for clipboard read + image processing by Claude
-
   } catch (err) {
     log(`Image upload error: ${err.message}`);
     try { fs.unlinkSync(tmpFile); } catch {}
