@@ -309,6 +309,11 @@ wss.on('connection', (ws) => {
         // Raw terminal keystrokes from xterm.js in WebUI
         if (claudeProc) claudeProc.write(msg.data);
         break;
+      case 'expect_clear':
+        // Plan mode option 1 triggers /clear inside Claude Code;
+        // client notifies us so we can detect the session switch.
+        markExpectingSwitch();
+        break;
       case 'chat':
         // Chat message from WebUI → write to PTY as user input
         // Must send text first, then Enter after a delay so Claude's

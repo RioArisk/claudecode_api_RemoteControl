@@ -2028,6 +2028,10 @@ function showPlanApproval(input) {
   optionsEl.querySelectorAll('.question-opt').forEach(btn => {
     btn.addEventListener('click', () => {
       if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+      // Option 1 triggers /clear inside Claude Code — notify server to expect session switch
+      if (btn.dataset.num === '1') {
+        S.ws.send(JSON.stringify({ type: 'expect_clear' }));
+      }
       S.ws.send(JSON.stringify({ type: 'input', data: btn.dataset.num }));
       $('plan-overlay').classList.remove('visible');
     });
