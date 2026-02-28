@@ -96,11 +96,13 @@
       <div id="image-preview-inner">
         <img id="image-preview-img">
         <div id="image-upload-overlay" class="hidden">
-          <svg viewBox="0 0 36 36" class="upload-ring">
-            <path class="upload-ring-track" d="M18 2.5a15.5 15.5 0 1 1 0 31a15.5 15.5 0 1 1 0-31"/>
-            <path id="image-upload-ring" class="upload-ring-progress" d="M18 2.5a15.5 15.5 0 1 1 0 31a15.5 15.5 0 1 1 0-31"/>
-          </svg>
-          <span id="image-upload-text">0%</span>
+          <div class="upload-ring-wrap">
+            <svg viewBox="0 0 36 36" class="upload-ring">
+              <path class="upload-ring-track" d="M18 2.5a15.5 15.5 0 1 1 0 31a15.5 15.5 0 1 1 0-31"/>
+              <path id="image-upload-ring" class="upload-ring-progress" d="M18 2.5a15.5 15.5 0 1 1 0 31a15.5 15.5 0 1 1 0-31"/>
+            </svg>
+            <span id="image-upload-text">0%</span>
+          </div>
         </div>
         <button id="image-preview-remove" title="Remove">&times;</button>
       </div>

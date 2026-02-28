@@ -804,40 +804,49 @@ header {
   border-radius: 6px; object-fit: cover;
 }
 #image-upload-overlay {
-  position: absolute; inset: 6px 34px 6px 6px;
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 4px;
-  background: rgba(12, 17, 26, 0.42);
-  border-radius: 6px;
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  border-radius: var(--radius-sm);
   color: #fff;
   pointer-events: none;
+  z-index: 1;
 }
 #image-upload-overlay.hidden { display: none; }
+.upload-ring-wrap {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  width: 52px; height: 52px;
+}
 .upload-ring {
-  width: 34px; height: 34px;
+  position: absolute; inset: 0;
+  width: 52px; height: 52px;
   transform: rotate(-90deg);
+  filter: drop-shadow(0 0 4px rgba(255,255,255,.25));
 }
 .upload-ring-track,
 .upload-ring-progress {
   fill: none;
-  stroke-width: 3;
+  stroke-width: 3.5;
   stroke-linecap: round;
   stroke-dasharray: 97.4;
 }
-.upload-ring-track { stroke: rgba(255,255,255,.2); }
+.upload-ring-track { stroke: rgba(255,255,255,.18); }
 .upload-ring-progress {
   stroke: #fff;
   stroke-dashoffset: 97.4;
-  transition: stroke-dashoffset .15s ease;
+  transition: stroke-dashoffset .25s cubic-bezier(.4,0,.2,1);
 }
 #image-upload-text {
-  font-size: 11px;
+  position: relative;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: .02em;
+  letter-spacing: .03em;
+  text-shadow: 0 1px 3px rgba(0,0,0,.4);
 }
 #image-preview-remove {
-  position: absolute; top: -6px; right: -6px;
+  position: absolute; top: -6px; right: -6px; z-index: 2;
   width: 22px; height: 22px; border-radius: 50%;
   background: var(--text); color: #fff; border: 2px solid var(--bg);
   font-size: 13px; line-height: 1; cursor: pointer;
