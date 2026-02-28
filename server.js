@@ -42,7 +42,7 @@ const ALWAYS_AUTO_ALLOW = new Set(['TaskCreate', 'TaskUpdate']);
 const PARTIAL_AUTO_ALLOW = new Set(['Read', 'Glob', 'Grep', 'Write', 'Edit']);
 
 // --- Logging → file only (never pollute the terminal) ---
-const LOG_FILE = path.join(__dirname, 'bridge.log');
+const LOG_FILE = path.join(os.homedir(), '.claude', 'bridge.log');
 fs.writeFileSync(LOG_FILE, `--- Bridge started ${new Date().toISOString()} ---\n`);
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;

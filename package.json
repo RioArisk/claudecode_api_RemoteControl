@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Remote control bridge for Claude Code REPL - drive from phone/WebUI",
   "main": "server.js",
+  "bin": {
+    "claude-remote": "bin/claude-remote.js"
+  },
+  "files": [
+    "server.js",
+    "hooks/",
+    "bin/"
+  ],
   "scripts": {
     "start": "node server.js"
   },

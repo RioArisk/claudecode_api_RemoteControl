@@ -1,4 +1,4 @@
-# Claude API Remote Control
+# Claude Remote
 
 > 在手机上远程操控 Claude Code —— 随时随地写代码、审批权限、切换模型。
 
@@ -11,6 +11,49 @@
 - 🔐 权限审批 —— 手机上一键 Allow / Deny
 - 🔄 模式切换 —— Default / Plan / Accept Edits / Bypass
 - 📱 斜杠命令 —— /model /compact /clear /cost /help
+
+## 快速开始
+
+### 1. 安装
+
+```bash
+npm install -g claude-remote
+```
+
+### 2. 启动
+
+在任意项目目录下运行：
+
+```bash
+claude-remote
+```
+
+会在当前目录启动 Claude Code 并开启远程控制服务（默认端口 3100）。
+
+指定端口：
+
+```bash
+PORT=8080 claude-remote
+```
+
+### 3. 手机访问
+
+确保手机和电脑在同一局域网，浏览器打开：
+
+```
+http://<电脑IP>:3100
+```
+
+### 4. Android App（可选）
+
+```bash
+cd app
+npm install
+npx tauri android init
+npx tauri android dev
+```
+
+App 启动后输入 server 地址连接即可。
 
 ## 架构
 
@@ -30,59 +73,6 @@
 - 监听 `~/.claude/projects/` 下的 JSONL transcript 文件，实时解析事件
 - 通过 WebSocket 将事件广播给所有连接的客户端
 - 转发客户端输入到 Claude PTY
-
-## 快速开始
-
-### 1. 启动 Bridge Server
-
-```bash
-# 首次运行先安装依赖
-cd /path/to/claudecode_api_RemoteControl
-npm install
-
-# 在任意项目目录下，用完整路径启动（默认端口 3100）
-node /path/to/claudecode_api_RemoteControl/server.js
-
-# 或指定端口
-PORT=8080 node /path/to/claudecode_api_RemoteControl/server.js
-```
-
-### 2. 手机浏览器访问
-
-确保手机和电脑在同一局域网，浏览器打开：
-
-```
-http://<电脑IP>:3100
-```
-
-### 3. Android App（可选）
-
-```bash
-cd app
-npm install
-npx tauri android init
-npx tauri android dev
-```
-
-App 启动后输入 server 地址连接即可。
-
-## 项目结构
-
-```
-├── server.js              # Bridge 服务器（HTTP + WebSocket + PTY）
-├── web/
-│   └── index.html         # Web UI（单文件 SPA）
-├── app/                   # Tauri 2.0 Android 客户端
-│   ├── src/
-│   │   ├── index.html     # 入口页面（含连接页）
-│   │   ├── main.js        # 业务逻辑
-│   │   └── styles.css     # 样式
-│   └── src-tauri/
-│       ├── src/lib.rs     # Rust 入口（最小化）
-│       └── tauri.conf.json
-├── hooks/                 # Claude Code permission hooks
-└── package.json
-```
 
 ## 功能特性
 
@@ -108,7 +98,7 @@ App 启动后输入 server 地址连接即可。
 
 ## TODO
 
-> 本项目看到 Claude Code 官方远程控制，可惜不支持api调用的模式，于是空闲时间摸鱼用 vibing code 写的小东西，目前处于快速迭代阶段。
+> 本项目看到 Claude Code 官方远程控制，可惜不支持 API 调用的模式，于是空闲时间摸鱼用 vibing code 写的小东西，目前处于快速迭代阶段。
 
 - [x] 提问与计划远程弹窗（AskUserQuestion / ExitPlanMode 远程交互）
 - [x] 自动审批命令模式
@@ -118,4 +108,5 @@ App 启动后输入 server 地址连接即可。
 - [x] 缓存机制 —— 避免每次 App 重连全量回放
 - [x] App 支持图片上传
 - [x] /命令指令及样式美化
+- [x] npm 包化 —— `npm install -g claude-remote` 全局安装，`claude-remote` 一键启动
 - [ ] Tool Use 状态渲染（进行中 / 成功 / 失败）
