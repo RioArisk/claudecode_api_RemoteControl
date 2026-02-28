@@ -254,6 +254,20 @@ const $msgs = $('messages'), $chat = $('chat-area'), $input = $('input');
 const INPUT_PLACEHOLDER_DEFAULT = 'Reply...';
 const INPUT_PLACEHOLDER_WAITING = 'AI 思考中…';
 
+// Delegated click for thinking-toggle, step-group-header, step-item (works after cache restore)
+$msgs.addEventListener('click', (e) => {
+  const toggle = e.target.closest('.thinking-toggle');
+  if (toggle) { toggle.parentElement.classList.toggle('open'); return; }
+  const header = e.target.closest('.step-group-header');
+  if (header) { header.parentElement.classList.toggle('open'); return; }
+  const item = e.target.closest('.step-item');
+  if (item) {
+    const toolId = item.dataset.toolId;
+    const detail = toolId && document.getElementById(`detail-${toolId}`);
+    if (detail) detail.classList.toggle('open');
+  }
+});
+
 // ============================================================
 //  Utilities
 // ============================================================
@@ -650,9 +664,7 @@ function clearConversationUi() {
 }
 
 function bindToolToggle(item, detail) {
-  if (!item || !detail || item.dataset.boundClick === '1') return;
-  item.dataset.boundClick = '1';
-  item.addEventListener('click', () => detail.classList.toggle('open'));
+  // handled by delegated click on $msgs
 }
 
 function rebuildRuntimeStateFromDom() {
@@ -976,7 +988,7 @@ function ensureGroup() {
     const g = document.createElement('div');
     g.className = 'step-group open';
     g.innerHTML = `
-      <div class="step-group-header" onclick="this.parentElement.classList.toggle('open')">
+      <div class="step-group-header">
         <span class="step-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg></span>
         <span class="step-count">steps</span>
       </div>
@@ -1226,7 +1238,7 @@ function renderThinking(b) {
   el.className = 'thinking';
   const preview = trunc(b.thinking.replace(/\n/g, ' '), 60);
   el.innerHTML = `
-    <div class="thinking-toggle" onclick="this.parentElement.classList.toggle('open')">
+    <div class="thinking-toggle">
       <span class="thinking-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg></span>
       <span>Thinking</span>
       <span style="color:var(--text-muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${esc(preview)}</span>

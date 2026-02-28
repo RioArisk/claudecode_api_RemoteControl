@@ -250,7 +250,7 @@ header {
 
 /* ===== Thinking ===== */
 .thinking {
-  margin: 8px 0; border-radius: var(--radius-sm);
+  margin: 2px 0; border-radius: var(--radius-sm);
   overflow: hidden; animation: fadeUp .2s ease;
 }
 .thinking-toggle {
@@ -275,7 +275,7 @@ header {
 .thinking.open .thinking-content { display: block; }
 
 /* ===== Step Group (tool calls) ===== */
-.step-group { margin: 12px 0; animation: fadeUp .2s ease; }
+.step-group { margin: 2px 0; animation: fadeUp .2s ease; }
 .step-group-header {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 0; cursor: pointer; user-select: none;
