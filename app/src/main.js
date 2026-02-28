@@ -175,6 +175,8 @@ if (lastAddr) $('server-addr').value = lastAddr;
 renderHistory();
 
 let serverAddr = '';
+let serverWsUrl = '';
+let serverCacheAddr = '';
 let pendingImage = null; // { file, mediaType, name, previewUrl, uploadId, status, progress, ... }
 
 $('btn-connect').addEventListener('click', tryConnect);
@@ -183,12 +185,19 @@ $('server-addr').addEventListener('keydown', e => {
 });
 
 function tryConnect() {
-  let addr = $('server-addr').value.trim();
-  if (!addr) { $('connect-error').textContent = 'Please enter a server address'; return; }
+  const input = $('server-addr').value.trim();
+  if (!input) { $('connect-error').textContent = 'Please enter a server address'; return; }
 
-  // Normalize: strip protocol if entered
-  addr = addr.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '').replace(/\/$/, '');
-  serverAddr = addr;
+  const parsed = parseServerAddress(input);
+  if (!parsed.ok) {
+    $('connect-error').textContent = parsed.error;
+    return;
+  }
+
+  serverAddr = parsed.displayAddr;
+  serverWsUrl = parsed.wsUrl;
+  serverCacheAddr = parsed.cacheAddr;
+  $('server-addr').value = parsed.displayAddr;
 
   $('connect-error').textContent = '';
   $('btn-connect').classList.add('connecting');
@@ -250,6 +259,48 @@ const INPUT_PLACEHOLDER_WAITING = 'AI 思考中…';
 // ============================================================
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function trunc(s, n) { return (!s || s.length <= n) ? s : s.substring(0, n) + '...'; }
+
+function formatUrlForDisplay(url, includeScheme) {
+  const auth = url.username ? `${url.username}${url.password ? `:${url.password}` : ''}@` : '';
+  const base = `${auth}${url.host}`;
+  const path = url.pathname === '/' ? '' : url.pathname;
+  const prefix = includeScheme ? `${url.protocol}//` : '';
+  return `${prefix}${base}${path}${url.search}${url.hash}`;
+}
+
+function parseServerAddress(input) {
+  const raw = input.trim();
+  if (!raw) return { ok: false, error: 'Please enter a server address' };
+
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
+  let url;
+  try {
+    url = new URL(hasScheme ? raw : `ws://${raw}`);
+  } catch {
+    return { ok: false, error: 'Invalid address' };
+  }
+
+  const protocol = url.protocol.toLowerCase();
+  let wsProtocol;
+  if (protocol === 'ws:') wsProtocol = 'ws:';
+  else if (protocol === 'wss:') wsProtocol = 'wss:';
+  else if (protocol === 'http:') wsProtocol = 'ws:';
+  else if (protocol === 'https:') wsProtocol = 'wss:';
+  else return { ok: false, error: 'Use ws://, wss://, http://, https://, or host:port' };
+
+  if (!url.hostname) return { ok: false, error: 'Invalid address' };
+  if (!hasScheme && !url.port) url.port = '3100';
+
+  const wsUrl = new URL(url.toString());
+  wsUrl.protocol = wsProtocol;
+
+  return {
+    ok: true,
+    displayAddr: formatUrlForDisplay(url, hasScheme),
+    wsUrl: wsUrl.toString(),
+    cacheAddr: wsUrl.toString(),
+  };
+}
 
 function showToast(text) {
   const el = document.createElement('div');
@@ -653,11 +704,11 @@ function restoreTodoSnapshot(snapshot) {
 }
 
 async function restoreSessionCache(sessionId) {
-  if (!serverAddr || !sessionId) return false;
+  if (!serverCacheAddr || !sessionId) return false;
 
   let record;
   try {
-    record = await chatCacheRead(buildCacheKey(serverAddr, sessionId));
+    record = await chatCacheRead(buildCacheKey(serverCacheAddr, sessionId));
   } catch {
     return false;
   }
@@ -687,10 +738,10 @@ async function restoreSessionCache(sessionId) {
 }
 
 async function persistSessionCache() {
-  if (!serverAddr || !S.sessionId) return;
+  if (!serverCacheAddr || !S.sessionId) return;
   const todoSnapshot = getTodoSnapshot();
   const record = {
-    cacheKey: buildCacheKey(serverAddr, S.sessionId),
+    cacheKey: buildCacheKey(serverCacheAddr, S.sessionId),
     serverAddr,
     sessionId: S.sessionId,
     html: $msgs.innerHTML,
@@ -718,7 +769,7 @@ async function persistSessionCache() {
 }
 
 function scheduleSessionCacheSave() {
-  if (!serverAddr || !S.sessionId) return;
+  if (!serverCacheAddr || !S.sessionId) return;
   if (S.cacheSaveTimer) clearTimeout(S.cacheSaveTimer);
   S.cacheSaveTimer = setTimeout(async () => {
     S.cacheSaveTimer = null;
@@ -1588,10 +1639,9 @@ function send() {
 //  WebSocket
 // ============================================================
 function connect() {
-  const wsUrl = `ws://${serverAddr}`;
   let ws;
   try {
-    ws = new WebSocket(wsUrl);
+    ws = new WebSocket(serverWsUrl);
   } catch (e) {
     $('connect-error').textContent = 'Invalid address';
     $('btn-connect').classList.remove('connecting');
