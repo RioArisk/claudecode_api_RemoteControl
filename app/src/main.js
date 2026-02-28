@@ -57,6 +57,7 @@ if (lastAddr) $('server-addr').value = lastAddr;
 renderHistory();
 
 let serverAddr = '';
+let pendingImage = null; // { base64, mediaType, name }
 
 $('btn-connect').addEventListener('click', tryConnect);
 $('server-addr').addEventListener('keydown', e => {
@@ -203,7 +204,7 @@ function removeThinkingIndicator() {
 }
 
 function updateSendBtn() {
-  const empty = !$input.value.trim();
+  const empty = !$input.value.trim() && !pendingImage;
   $('btn-send').classList.toggle('empty', empty && !S.waiting);
 }
 
@@ -859,6 +860,53 @@ $input.addEventListener('keydown', e => {
 $('btn-send').addEventListener('click', send);
 $('btn-scroll').addEventListener('click', () => { $chat.scrollTop = $chat.scrollHeight; });
 
+// ============================================================
+//  Image Upload
+// ============================================================
+const MAX_IMAGE_SIZE = 4 * 1024 * 1024; // 4MB limit for base64
+
+$('btn-image').addEventListener('click', () => {
+  if (S.waiting) return;
+  $('image-file-input').click();
+});
+
+$('image-file-input').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = ''; // reset so same file can be re-selected
+
+  if (!file.type.startsWith('image/')) {
+    showToast('Please select an image file');
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    // dataUrl = "data:image/png;base64,xxxx..."
+    const base64 = dataUrl.split(',')[1];
+    if (base64.length > MAX_IMAGE_SIZE) {
+      showToast('Image too large (max 4MB)');
+      return;
+    }
+    const mediaType = dataUrl.split(';')[0].split(':')[1]; // e.g. "image/png"
+    pendingImage = { base64, mediaType, name: file.name };
+
+    // Show preview
+    $('image-preview-img').src = dataUrl;
+    $('image-preview').classList.remove('hidden');
+    updateSendBtn();
+  };
+  reader.readAsDataURL(file);
+});
+
+$('image-preview-remove').addEventListener('click', () => {
+  pendingImage = null;
+  $('image-preview').classList.add('hidden');
+  $('image-preview-img').src = '';
+  updateSendBtn();
+});
+
 updateSendBtn();
 
 // Back button — disconnect and return to connect screen
@@ -887,6 +935,10 @@ function resetAppState() {
   S.waitStartedAt = 0;
   S.replaying = true;
   S.intentionalDisconnect = false;
+  // Clear pending image
+  pendingImage = null;
+  $('image-preview').classList.add('hidden');
+  $('image-preview-img').src = '';
   resetTodoState();
   // Reset UI — use id="welcome" so getWelcome() can find it
   $msgs.innerHTML = `<div class="welcome" id="welcome">
@@ -907,21 +959,45 @@ function resetAppState() {
 
 function send() {
   const t = $input.value.trim();
-  if (!t || !S.ws || S.ws.readyState !== WebSocket.OPEN || S.waiting) return;
+  const hasImage = !!pendingImage;
+  if ((!t && !hasImage) || !S.ws || S.ws.readyState !== WebSocket.OPEN || S.waiting) return;
 
-  // Intercept slash commands typed directly
-  if (/^\/[a-z]+$/i.test(t)) {
+  // Intercept slash commands typed directly (only when no image)
+  if (!hasImage && /^\/[a-z]+$/i.test(t)) {
     execCmd(t);
     return;
   }
 
   removeWelcome(); closeGroup();
+
+  // Show user message bubble (with image thumbnail if present)
   const el = document.createElement('div');
   el.className = 'user-msg'; el.dataset.optimistic = '1';
-  el.innerHTML = esc(t).replace(/\n/g, '<br>');
+  let html = '';
+  if (hasImage) {
+    html += `<img src="data:${pendingImage.mediaType};base64,${pendingImage.base64}" style="max-width:200px;max-height:120px;border-radius:8px;display:block;margin-bottom:${t ? '6px' : '0'}">`;
+  }
+  if (t) html += esc(t).replace(/\n/g, '<br>');
+  el.innerHTML = html;
   $msgs.appendChild(el);
   S.isAtBottom = true; scrollEnd();
-  S.ws.send(JSON.stringify({ type: 'chat', text: t }));
+
+  // Send image first, then text
+  if (hasImage) {
+    S.ws.send(JSON.stringify({
+      type: 'image_upload',
+      base64: pendingImage.base64,
+      mediaType: pendingImage.mediaType,
+      name: pendingImage.name,
+      text: t || '',
+    }));
+    pendingImage = null;
+    $('image-preview').classList.add('hidden');
+    $('image-preview-img').src = '';
+  } else {
+    S.ws.send(JSON.stringify({ type: 'chat', text: t }));
+  }
+
   $input.value = ''; $input.style.height = 'auto';
   setWaiting(true);
 }

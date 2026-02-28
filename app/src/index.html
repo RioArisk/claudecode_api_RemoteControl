@@ -92,13 +92,23 @@
 
   <div id="input-area">
     <div id="cmd-menu"></div>
+    <div id="image-preview" class="hidden">
+      <div id="image-preview-inner">
+        <img id="image-preview-img">
+        <button id="image-preview-remove" title="Remove">&times;</button>
+      </div>
+    </div>
     <div id="input-row">
       <div class="input-pill">
         <textarea id="input" placeholder="Reply..." rows="1"></textarea>
+        <button id="btn-image" class="pill-icon-btn" title="Upload image">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        </button>
         <button id="btn-send" title="Send">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
         </button>
       </div>
+      <input type="file" id="image-file-input" accept="image/*" style="display:none">
       <button id="btn-scroll" title="Scroll to bottom">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
       </button>

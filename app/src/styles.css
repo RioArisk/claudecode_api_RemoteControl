@@ -774,6 +774,43 @@ header {
   opacity: .35; pointer-events: none;
 }
 
+/* ===== Image Upload Button ===== */
+.pill-icon-btn {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: transparent; border: none;
+  color: var(--text-muted); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .15s; flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+.pill-icon-btn:hover, .pill-icon-btn:active { color: var(--accent); background: var(--accent-light); }
+#input-area.waiting .pill-icon-btn { opacity: .3; pointer-events: none; }
+
+/* ===== Image Preview Strip ===== */
+#image-preview {
+  max-width: 720px; margin: 0 auto 8px;
+  padding: 0 6px;
+}
+#image-preview-inner {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-white); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 6px;
+  animation: fadeUp .2s ease;
+  position: relative;
+}
+#image-preview-img {
+  max-height: 80px; max-width: 160px;
+  border-radius: 6px; object-fit: cover;
+}
+#image-preview-remove {
+  position: absolute; top: -6px; right: -6px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--text); color: #fff; border: 2px solid var(--bg);
+  font-size: 13px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#image-preview-remove:active { background: var(--error); }
+
 /* ===== Scroll-to-bottom ===== */
 #btn-scroll {
   width: 40px; height: 40px; border-radius: 50%;

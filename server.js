@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const pty = require('node-pty');
 const { WebSocketServer, WebSocket } = require('ws');
+const { execSync } = require('child_process');
 
 // --- Config ---
 const PORT = parseInt(process.env.PORT || '3100', 10);
@@ -224,6 +225,10 @@ wss.on('connection', (ws) => {
             broadcast({ type: 'clear_permissions' });
           }
         }
+        break;
+      }
+      case 'image_upload': {
+        handleImageUpload(msg);
         break;
       }
     }
@@ -545,7 +550,85 @@ function stopTailing() {
 }
 
 // ============================================================
-//  5. Hook Auto-Setup
+//  5. Image Upload → Clipboard Injection
+// ============================================================
+function handleImageUpload(msg) {
+  if (!claudeProc) {
+    log('Image upload ignored: Claude not running');
+    return;
+  }
+  if (!msg.base64) {
+    log('Image upload ignored: no base64 data');
+    return;
+  }
+
+  const isWin = process.platform === 'win32';
+  const isMac = process.platform === 'darwin';
+  const tmpDir = process.env.CLAUDE_CODE_TMPDIR || os.tmpdir();
+  const ext = (msg.mediaType || 'image/png').includes('jpeg') || (msg.mediaType || '').includes('jpg') ? '.jpg' : '.png';
+  const tmpFile = path.join(tmpDir, `bridge_upload_${Date.now()}${ext}`);
+
+  try {
+    // 1. Write base64 to temp file
+    const buf = Buffer.from(msg.base64, 'base64');
+    fs.writeFileSync(tmpFile, buf);
+    log(`Image saved: ${tmpFile} (${buf.length} bytes)`);
+
+    // 2. Set system clipboard to this image
+    if (isWin) {
+      const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
+      execSync(`powershell -NoProfile -Command "${psCmd}"`, { timeout: 10000 });
+    } else if (isMac) {
+      execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as «class PNGf»)'`, { timeout: 10000 });
+    } else {
+      // Linux: try xclip then wl-copy
+      try {
+        execSync(`xclip -selection clipboard -t image/png -i < "${tmpFile}"`, { timeout: 10000, shell: true });
+      } catch {
+        execSync(`wl-copy --type image/png < "${tmpFile}"`, { timeout: 10000, shell: true });
+      }
+    }
+    log('Clipboard set with image');
+
+    // 3. Strategy: paste image first (Alt+V / Ctrl+V), then type text, then Enter
+    //    Claude Code appends [Image #N] to the current input on paste keypress,
+    //    so we paste first, type text after, then submit with Enter.
+
+    // Send Alt+V (Windows) or Ctrl+V (macOS/Linux) to trigger Claude's image paste
+    if (isWin) {
+      claudeProc.write('\x1bv'); // Alt+V = ESC + v
+    } else {
+      claudeProc.write('\x16'); // Ctrl+V
+    }
+    log('Sent image paste keypress to PTY');
+
+    // After paste is processed, type text if any, then press Enter
+    setTimeout(() => {
+      if (!claudeProc) return;
+      const text = (msg.text || '').trim();
+      if (text) {
+        claudeProc.write(text);
+      }
+      setTimeout(() => {
+        if (claudeProc) claudeProc.write('\r');
+        log('Sent Enter after image paste' + (text ? ` + text: "${text.substring(0, 60)}"` : ''));
+
+        // Clean up temp file after a delay
+        setTimeout(() => {
+          try { fs.unlinkSync(tmpFile); } catch {}
+        }, 5000);
+      }, 150);
+    }, 1000); // Wait for clipboard read + image processing by Claude
+
+  } catch (err) {
+    log(`Image upload error: ${err.message}`);
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+}
+
+// ============================================================
+//  6. Hook Auto-Setup
+
 // ============================================================
 function setupHooks() {
   const claudeDir = path.join(CWD, '.claude');
@@ -581,7 +664,7 @@ function setupHooks() {
 }
 
 // ============================================================
-//  6. Startup
+//  7. Startup
 // ============================================================
 server.listen(PORT, '0.0.0.0', () => {
   const ifaces = os.networkInterfaces();
