@@ -1023,24 +1023,6 @@ function isJunkContent(content) {
   return JUNK_PATTERNS.some(p => p.test(t));
 }
 
-function isAssistantTurnDone(evt) {
-  if (!evt || evt.type !== 'assistant' || !evt.message) return false;
-  const sr = evt.message.stop_reason;
-  if (!sr) return false;
-  // tool_use means Claude is still in the same turn (tool running / awaiting result).
-  return sr !== 'tool_use';
-}
-
-function isCurrentWaitingTurnEvent(evt) {
-  if (!S.waiting || !evt || evt.type !== 'assistant' || !evt.message) return false;
-
-  const ts = Date.parse(evt.timestamp || '');
-  if (Number.isFinite(ts) && S.waitStartedAt && ts < (S.waitStartedAt - 1500)) {
-    return false;
-  }
-  return true;
-}
-
 function processEvent(evt, seq) {
   try {
     if (!evt) return;
@@ -1087,11 +1069,9 @@ function processEvent(evt, seq) {
 
     if (evt.type === 'user' && evt.message) renderUser(evt);
     else if (evt.type === 'assistant' && evt.message) {
-      const isCurrentTurn = isCurrentWaitingTurnEvent(evt);
       // Keep input locked while assistant turn is active; only remove spinner on first valid reply chunk.
-      if (isCurrentTurn) removeThinkingIndicator();
+      if (S.waiting) removeThinkingIndicator();
       renderAssistant(evt);
-      if (isCurrentTurn && isAssistantTurnDone(evt)) setWaiting(false);
     }
     scrollEnd();
     scheduleSessionCacheSave();
@@ -1796,6 +1776,9 @@ function connect() {
         if ('sessionId' in m) await syncSessionState(m.sessionId, m.lastSeq);
       }
       else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
+      else if (m.type === 'turn_complete') {
+        if (S.waiting) setWaiting(false);
+      }
       else if (m.type === 'permission_request') showPermission(m);
       else if (m.type === 'clear_permissions') {
         S.pendingPerms = [];

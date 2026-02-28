@@ -22,6 +22,9 @@ let eventSeq = 0;
 const EVENT_BUFFER_MAX = 5000;
 let tailTimer = null;
 let discoveryTimer = null;
+let switchWatcher = null;
+let expectingSwitch = false;
+let expectingSwitchTimer = null;
 let preExistingFiles = new Set();
 let preExistingFileSizes = new Map();
 let tailRemainder = Buffer.alloc(0);
@@ -128,6 +131,19 @@ const server = http.createServer((req, res) => {
       }, 90000);
 
       pendingApprovals.set(id, { res, timer });
+    });
+    return;
+  }
+
+  // --- API: Stop hook endpoint ---
+  if (req.method === 'POST' && url === '/hook/stop') {
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', () => {
+      log('/hook/stop received — broadcasting turn_complete');
+      broadcast({ type: 'turn_complete' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
     });
     return;
   }
@@ -300,6 +316,9 @@ wss.on('connection', (ws) => {
         if (claudeProc) {
           const text = msg.text;
           log(`Chat input → PTY: "${text.substring(0, 80)}"`);
+          if (/^\/clear\s*$/i.test(text.trim())) {
+            markExpectingSwitch();
+          }
           claudeProc.write(text);
           setTimeout(() => {
             if (claudeProc) claudeProc.write('\r');
@@ -688,6 +707,7 @@ function attachTranscript(target, startOffset = 0) {
     discoveryTimer = null;
   }
   startTailing();
+  startSwitchWatcher();
 }
 
 function snapshotExistingFiles() {
@@ -758,6 +778,49 @@ function startDiscovery() {
   }, 500);
 }
 
+function markExpectingSwitch() {
+  expectingSwitch = true;
+  if (expectingSwitchTimer) clearTimeout(expectingSwitchTimer);
+  expectingSwitchTimer = setTimeout(() => {
+    expectingSwitch = false;
+    expectingSwitchTimer = null;
+    log('Expecting-switch flag expired (no new transcript found)');
+  }, 15000);
+  log('Expecting session switch (/clear detected)');
+}
+
+function startSwitchWatcher() {
+  if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
+  const slug = getProjectSlug(CWD);
+  const projectDir = path.join(PROJECTS_DIR, slug);
+
+  switchWatcher = setInterval(() => {
+    if (!transcriptPath || !expectingSwitch || !fs.existsSync(projectDir)) return;
+    try {
+      const currentBasename = path.basename(transcriptPath);
+      const candidates = fs.readdirSync(projectDir)
+        .filter(f => f.endsWith('.jsonl') && f !== currentBasename)
+        .map(f => {
+          const full = path.join(projectDir, f);
+          const stat = fs.statSync(full);
+          return { name: f, full, mtime: stat.mtimeMs, size: stat.size };
+        })
+        .filter(t => t.mtime > fs.statSync(transcriptPath).mtimeMs)
+        .sort((a, b) => b.mtime - a.mtime);
+
+      const newer = candidates.find(t => fileLooksLikeTranscript(t.full));
+      if (newer) {
+        log(`Session switch detected → ${path.basename(newer.full, '.jsonl')}`);
+        expectingSwitch = false;
+        if (expectingSwitchTimer) { clearTimeout(expectingSwitchTimer); expectingSwitchTimer = null; }
+        if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
+        if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
+        attachTranscript(newer, 0);
+      }
+    } catch {}
+  }, 500);
+}
+
 function startTailing() {
   tailRemainder = Buffer.alloc(0);
   tailTimer = setInterval(() => {
@@ -781,6 +844,13 @@ function startTailing() {
         if (!line) continue;
         try {
           const event = JSON.parse(line);
+          // Detect /clear from JSONL events (covers terminal direct input)
+          if (event.type === 'user' || (event.message && event.message.role === 'user')) {
+            const content = event.message && event.message.content;
+            if (typeof content === 'string' && /^\/clear\s*$/i.test(content.trim())) {
+              markExpectingSwitch();
+            }
+          }
           const record = { seq: ++eventSeq, event };
           eventBuffer.push(record);
           if (eventBuffer.length > EVENT_BUFFER_MAX) {
@@ -801,6 +871,9 @@ function startTailing() {
 function stopTailing() {
   if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
   if (discoveryTimer) { clearInterval(discoveryTimer); discoveryTimer = null; }
+  if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
+  if (expectingSwitchTimer) { clearTimeout(expectingSwitchTimer); expectingSwitchTimer = null; }
+  expectingSwitch = false;
   tailRemainder = Buffer.alloc(0);
 }
 
@@ -922,6 +995,24 @@ function setupHooks() {
 
   settings.hooks = settings.hooks || {};
   settings.hooks.PreToolUse = existing;
+
+  // Merge bridge hook into Stop (notify WebUI when Claude's turn ends)
+  const stopScript = path.resolve(__dirname, 'hooks', 'bridge-stop.js').replace(/\\/g, '/');
+  const stopCmd = `node "${stopScript}"`;
+  const existingStop = settings.hooks.Stop || [];
+  const stopBridgeIdx = existingStop.findIndex(e =>
+    e.hooks?.some(h => h.command?.includes('bridge-stop'))
+  );
+  const stopEntry = {
+    hooks: [{ type: 'command', command: stopCmd, timeout: 10 }],
+  };
+  if (stopBridgeIdx >= 0) {
+    existingStop[stopBridgeIdx] = stopEntry;
+  } else {
+    existingStop.push(stopEntry);
+  }
+  settings.hooks.Stop = existingStop;
+
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   log(`Hooks configured: ${settingsPath}`);
 }
