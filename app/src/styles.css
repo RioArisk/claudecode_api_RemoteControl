@@ -293,7 +293,7 @@ header {
 
 /* ===== Step Item (single tool call) ===== */
 .step-item {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: baseline; gap: 10px;
   padding: 10px 8px 10px 0; min-height: 48px;
   position: relative; cursor: pointer;
   border-radius: var(--radius-sm);
@@ -421,6 +421,7 @@ header {
 .diff-header .diff-file-path {
   font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
 }
 .diff-body {
   overflow-x: auto; max-height: 350px; overflow-y: auto;
@@ -429,42 +430,45 @@ header {
 .diff-table {
   width: 100%; border-collapse: collapse;
   font-size: 12px; font-family: var(--mono);
-  line-height: 1.55;
+  line-height: 1.6;
 }
 .diff-table td {
   padding: 0; vertical-align: top;
   border: none;
 }
 .diff-ln {
-  width: 1px; white-space: nowrap;
-  padding: 0 8px;
+  min-width: 32px; width: 32px;
+  white-space: nowrap;
+  padding: 0 6px;
   text-align: right;
   color: var(--text-muted);
-  opacity: .6;
+  opacity: .5;
   user-select: none;
   font-size: 11px;
 }
 .diff-sign {
-  width: 1px; white-space: nowrap;
-  padding: 0 2px 0 4px;
+  width: 16px; min-width: 16px;
+  white-space: nowrap;
+  padding: 0;
+  text-align: center;
   user-select: none;
   font-weight: 700;
 }
 .diff-code {
-  padding: 0 12px 0 4px;
+  padding: 0 12px 0 0;
   white-space: pre-wrap;
   word-break: break-all;
 }
 /* Delete line */
-.diff-del { background: #fff0f0; }
+.diff-del { background: rgba(255,0,0,.06); }
 .diff-del .diff-sign { color: #d73a49; }
 .diff-del .diff-code { color: #6e3630; }
-.diff-del .diff-ln { background: #ffdce0; }
+.diff-del .diff-ln { background: rgba(255,0,0,.08); }
 /* Add line */
-.diff-add { background: #e6ffec; }
+.diff-add { background: rgba(0,180,0,.06); }
 .diff-add .diff-sign { color: #22863a; }
 .diff-add .diff-code { color: #24602e; }
-.diff-add .diff-ln { background: #ccffd8; }
+.diff-add .diff-ln { background: rgba(0,180,0,.08); }
 /* Context line */
 .diff-ctx { background: var(--code-bg); }
 .diff-ctx .diff-sign { color: transparent; }

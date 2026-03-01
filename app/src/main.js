@@ -1080,15 +1080,19 @@ function renderDiffOps(ops, filePath) {
   for (const o of ops) {
     const cls = o.type === 'del' ? 'diff-del' : o.type === 'add' ? 'diff-add' : 'diff-ctx';
     const sign = o.type === 'del' ? '-' : o.type === 'add' ? '+' : ' ';
-    const oldN = o.oldLn != null ? o.oldLn : '';
-    const newN = o.newLn != null ? o.newLn : '';
-    rows += `<tr class="${cls}"><td class="diff-ln">${oldN}</td><td class="diff-ln">${newN}</td><td class="diff-sign">${sign}</td><td class="diff-code">${esc(o.text)}</td></tr>`;
+    // Single line number column: show the most relevant line number
+    const ln = o.type === 'del' ? (o.oldLn || '') : (o.newLn || o.oldLn || '');
+    rows += `<tr class="${cls}"><td class="diff-ln">${ln}</td><td class="diff-sign">${sign}</td><td class="diff-code">${esc(o.text)}</td></tr>`;
   }
 
-  const ext = (filePath || '').split('.').pop() || '';
   const shortPath = shortenPath(filePath);
 
   return `<div class="diff-view">
+    <div class="diff-header">
+      <svg class="diff-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      <span class="diff-file-path" title="${esc(filePath)}">${esc(shortPath)}</span>
+      <span class="diff-stats"><span class="ds-add">+${addCount}</span> <span class="ds-del">-${delCount}</span></span>
+    </div>
     <div class="diff-body"><table class="diff-table">${rows}</table></div>
   </div>`;
 }
