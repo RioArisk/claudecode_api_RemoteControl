@@ -328,6 +328,7 @@ wss.on('connection', (ws) => {
           if (/^\/clear\s*$/i.test(text.trim())) {
             markExpectingSwitch();
           }
+          broadcast({ type: 'working_started' });
           claudeProc.write(text);
           setTimeout(() => {
             if (claudeProc) claudeProc.write('\r');

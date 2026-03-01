@@ -1910,6 +1910,9 @@ function connect() {
       else if (m.type === 'turn_complete') {
         if (S.waiting) setWaiting(false);
       }
+      else if (m.type === 'working_started') {
+        if (!S.waiting) setWaiting(true);
+      }
       else if (m.type === 'permission_request') showPermission(m);
       else if (m.type === 'clear_permissions') {
         S.pendingPerms = [];
