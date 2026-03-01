@@ -550,10 +550,16 @@ wss.on('connection', (ws, req) => {
         if (claudeProc) {
           const text = msg.text;
           log(`Chat input → PTY: "${text.substring(0, 80)}"`);
-          if (/^\/clear\s*$/i.test(text.trim())) {
+          const isClear = /^\/clear\s*$/i.test(text.trim());
+          if (isClear) {
             markExpectingSwitch();
           }
-          broadcast({ type: 'working_started' });
+          // Slash commands (e.g. /clear, /help, /compact) are internal CLI
+          // commands, not AI turns — the stop hook will never fire, so don't
+          // enter the waiting state.
+          if (!text.trim().startsWith('/')) {
+            broadcast({ type: 'working_started' });
+          }
           claudeProc.write(text);
           setTimeout(() => {
             if (claudeProc) claudeProc.write('\r');
@@ -852,6 +858,12 @@ function attachTranscript(target, startOffset = 0) {
   eventBuffer = [];
   eventSeq = 0;
 
+  // Clear the expecting-switch state — we've found the new session.
+  if (expectingSwitch) {
+    expectingSwitch = false;
+    if (expectingSwitchTimer) { clearTimeout(expectingSwitchTimer); expectingSwitchTimer = null; }
+  }
+
   // If transcript file already has content, mark as catching up so we don't
   // broadcast working_started for historical user messages.
   try {
@@ -947,12 +959,14 @@ function startTailing() {
           const event = JSON.parse(line);
           // Detect /clear from JSONL events (covers terminal direct input)
           if (event.type === 'user' || (event.message && event.message.role === 'user')) {
+            const content = event.message && event.message.content;
+            const isSlashCmd = typeof content === 'string' && content.trim().startsWith('/');
             // Only broadcast working_started for live (new) user messages,
-            // not for historical events during catch-up.
-            if (!tailCatchingUp) {
+            // not for historical events during catch-up, and not for slash
+            // commands (which are CLI commands, not AI turns).
+            if (!tailCatchingUp && !isSlashCmd) {
               broadcast({ type: 'working_started' });
             }
-            const content = event.message && event.message.content;
             if (typeof content === 'string' && /^\/clear\s*$/i.test(content.trim())) {
               markExpectingSwitch();
             }

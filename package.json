@@ -1,6 +1,6 @@
 {
   "name": "claude-remote",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Remote control bridge for Claude Code REPL - drive from phone/WebUI",
   "main": "server.js",
   "bin": {
