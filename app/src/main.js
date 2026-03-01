@@ -312,6 +312,7 @@ $msgs.addEventListener('click', (e) => {
 // ============================================================
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function trunc(s, n) { return (!s || s.length <= n) ? s : s.substring(0, n) + '...'; }
+function stripImageTags(s) { return (s || '').replace(/\[Image:\s*source:\s*[^\]]*\]/g, '').trim(); }
 
 function formatUrlForDisplay(url, includeScheme) {
   const auth = url.username ? `${url.username}${url.password ? `:${url.password}` : ''}@` : '';
@@ -1088,11 +1089,6 @@ function renderDiffOps(ops, filePath) {
   const shortPath = shortenPath(filePath);
 
   return `<div class="diff-view">
-    <div class="diff-header">
-      <svg class="diff-file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
-      <span class="diff-file-path" title="${esc(filePath)}">${esc(shortPath)}</span>
-      <span class="diff-stats"><span class="ds-add">+${addCount}</span><span class="ds-del">-${delCount}</span></span>
-    </div>
     <div class="diff-body"><table class="diff-table">${rows}</table></div>
   </div>`;
 }
@@ -1246,7 +1242,10 @@ function renderUser(evt) {
         }).join('');
       }
       if (textBlocks.length > 0) {
-        html += textBlocks.map(block => esc(block.text).replace(/\n/g, '<br>')).join('<br>');
+        const cleaned = textBlocks.map(block => stripImageTags(block.text)).filter(Boolean);
+        if (cleaned.length > 0) {
+          html += cleaned.map(t => esc(t).replace(/\n/g, '<br>')).join('<br>');
+        }
       }
       if (html) {
         el.innerHTML = html;
@@ -1262,14 +1261,17 @@ function renderUser(evt) {
     }
     return;
   }
-  if (typeof c === 'string' && c.trim()) {
-    closeGroup();
-    const opt = $msgs.querySelector('[data-optimistic]');
-    if (opt) { opt.removeAttribute('data-optimistic'); return; }
-    const el = document.createElement('div');
-    el.className = 'user-msg';
-    el.innerHTML = esc(c).replace(/\n/g, '<br>');
-    $msgs.appendChild(el);
+  if (typeof c === 'string') {
+    const cleaned = stripImageTags(c);
+    if (cleaned.trim()) {
+      closeGroup();
+      const opt = $msgs.querySelector('[data-optimistic]');
+      if (opt) { opt.removeAttribute('data-optimistic'); return; }
+      const el = document.createElement('div');
+      el.className = 'user-msg';
+      el.innerHTML = esc(cleaned).replace(/\n/g, '<br>');
+      $msgs.appendChild(el);
+    }
   }
 }
 
@@ -1491,11 +1493,10 @@ function renderTool(b) {
   detail.id = `detail-${b.id}`;
   const inputFull = toolInputFull(b.name, b.input);
 
-  // Edit tool: render diff view
+  // Edit tool: render diff view (no result text — pure diff only)
   const isEdit = b.name === 'Edit' && b.input && b.input.old_string !== undefined;
   if (isEdit) {
-    detail.innerHTML = buildDiffHtml(b.input.old_string, b.input.new_string, b.input.file_path)
-      + `<div class="detail-result" id="result-${b.id}"></div>`;
+    detail.innerHTML = buildDiffHtml(b.input.old_string, b.input.new_string, b.input.file_path);
   } else {
     detail.innerHTML = `
       <div class="detail-input">${esc(inputFull)}</div>

@@ -288,7 +288,7 @@ header {
   display: flex; align-items: center; justify-content: center;
 }
 .step-group.open .step-chevron { transform: rotate(90deg); }
-.step-list { display: none; padding: 4px 0 4px 8px; }
+.step-list { display: none; padding: 4px 0; }
 .step-group.open .step-list { display: block; }
 
 /* ===== Step Item (single tool call) ===== */
@@ -358,7 +358,7 @@ header {
   font-size: 14px; opacity: .5;
 }
 .step-detail {
-  display: none; margin: 0 0 8px 42px;
+  display: none; margin: 0 0 8px 0;
   background: var(--code-bg); border: 1px solid var(--border);
   border-radius: var(--radius-sm); overflow: hidden;
   animation: fadeUp .15s ease;
