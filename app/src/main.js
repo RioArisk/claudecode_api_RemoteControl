@@ -1396,14 +1396,58 @@ function attachResult(b) {
   if (isErr) info.detail.classList.add('error');
 
   let text = '';
-  if (typeof b.content === 'string') text = b.content;
-  else if (Array.isArray(b.content)) text = b.content.map(c => c.text || JSON.stringify(c)).join('\n');
+  let images = [];
+  if (typeof b.content === 'string') {
+    text = b.content;
+  } else if (Array.isArray(b.content)) {
+    const textParts = [];
+    for (const c of b.content) {
+      if (c.type === 'image' && c.source && c.source.data) {
+        const mediaType = c.source.media_type || 'image/png';
+        images.push({ data: c.source.data, mediaType });
+      } else if (c.text) {
+        textParts.push(c.text);
+      } else {
+        textParts.push(JSON.stringify(c));
+      }
+    }
+    text = textParts.join('\n');
+  }
 
   const resultEl = info.detail.querySelector('.detail-result');
   if (resultEl) {
     resultEl.textContent = trunc(text, 3000);
     if (isErr) resultEl.style.color = 'var(--error)';
   }
+
+  // Render images as top-level blocks (same level as assistant-text)
+  if (images.length > 0) {
+    closeGroup();
+    for (const img of images) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'result-image-block';
+      const imgEl = document.createElement('img');
+      imgEl.src = `data:${img.mediaType};base64,${img.data}`;
+      imgEl.addEventListener('click', () => showImageOverlay(imgEl.src));
+      wrapper.appendChild(imgEl);
+      $msgs.appendChild(wrapper);
+    }
+    scrollEnd();
+  }
+}
+
+function showImageOverlay(src) {
+  let overlay = document.getElementById('image-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'image-overlay';
+    overlay.className = 'image-overlay';
+    overlay.addEventListener('click', () => overlay.classList.remove('visible'));
+    overlay.innerHTML = '<img>';
+    document.body.appendChild(overlay);
+  }
+  overlay.querySelector('img').src = src;
+  overlay.classList.add('visible');
 }
 
 // ============================================================

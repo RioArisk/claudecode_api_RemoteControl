@@ -148,4 +148,5 @@ npx tauri android dev
 - [x] App 支持图片上传
 - [x] /命令指令及样式美化
 - [x] npm 包化 —— `npm install -g claude-remote` 全局安装，`claude-remote` 一键启动
+- [x] AI 截图显示 —— 工具返回的图片（如 Playwright 截图）全宽渲染，点击全屏查看
 - [ ] Tool Use 状态渲染（进行中 / 成功 / 失败）

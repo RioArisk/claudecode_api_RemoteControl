@@ -384,6 +384,24 @@ header {
   max-height: 250px; overflow-y: auto;
   overscroll-behavior-y: contain;
 }
+.result-image-block {
+  margin: 12px 0; animation: fadeUp .2s ease;
+}
+.result-image-block img {
+  max-width: 100%; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+.image-overlay {
+  display: none; position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,.85); align-items: center; justify-content: center;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.image-overlay.visible { display: flex; }
+.image-overlay img {
+  max-width: 95vw; max-height: 95vh; object-fit: contain;
+  border-radius: 8px;
+}
 
 /* ===== Diff View ===== */
 .diff-view {
