@@ -197,16 +197,37 @@ function maybeAttachHookSession(data, source) {
   const target = resolveHookTranscript(data);
   if (!target) return;
 
+  // Already attached to this exact session — no-op
   if (currentSessionId === target.sessionId && transcriptPath &&
       normalizeFsPath(transcriptPath) === normalizeFsPath(target.full)) {
     return;
   }
 
-  // session-start is authoritative — always allow it to switch sessions.
-  // pre-tool-use is opportunistic — only accept if expecting a switch.
-  if (currentSessionId && currentSessionId !== target.sessionId && !expectingSwitch && source !== 'session-start') {
-    log(`Ignored hook session from ${source}: ${target.sessionId} (current=${currentSessionId})`);
-    return;
+  // Switching to a different session — apply source-specific guards.
+  if (currentSessionId && currentSessionId !== target.sessionId && !expectingSwitch) {
+    const targetHasContent = fileLooksLikeTranscript(target.full);
+
+    if (source === 'session-start') {
+      // --resume triggers two session-start hooks in unpredictable order.
+      // Don't switch away from a transcript with conversation content to an
+      // empty one — the one with content is the real resumed session.
+      const currentHasContent = transcriptPath && fileLooksLikeTranscript(transcriptPath);
+      if (currentHasContent && !targetHasContent) {
+        log(`Ignored hook session from ${source}: ${target.sessionId} (current has content, target empty)`);
+        return;
+      }
+    } else if (source === 'pre-tool-use') {
+      // pre-tool-use is the most reliable signal — it comes from the actually
+      // running Claude process. Accept it if the transcript has content.
+      if (!targetHasContent) {
+        log(`Ignored hook session from ${source}: ${target.sessionId} (no conversation content)`);
+        return;
+      }
+    } else {
+      // Unknown source — block unexpected switches
+      log(`Ignored hook session from ${source}: ${target.sessionId} (current=${currentSessionId})`);
+      return;
+    }
   }
 
   log(`Hook session attached from ${source}: ${target.sessionId}`);
