@@ -201,7 +201,9 @@ function maybeAttachHookSession(data, source) {
     return;
   }
 
-  if (currentSessionId && currentSessionId !== target.sessionId && !expectingSwitch) {
+  // session-start is authoritative — always allow it to switch sessions.
+  // pre-tool-use is opportunistic — only accept if expecting a switch.
+  if (currentSessionId && currentSessionId !== target.sessionId && !expectingSwitch && source !== 'session-start') {
     log(`Ignored hook session from ${source}: ${target.sessionId} (current=${currentSessionId})`);
     return;
   }
