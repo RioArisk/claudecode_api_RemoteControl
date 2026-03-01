@@ -294,12 +294,16 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        const clientServerLastSeq = Number.isInteger(msg.serverLastSeq) && msg.serverLastSeq >= 0
+          ? msg.serverLastSeq
+          : null;
         const canResume = (
           msg.sessionId &&
           msg.sessionId === currentSessionId &&
           Number.isInteger(msg.lastSeq) &&
           msg.lastSeq >= 0 &&
-          msg.lastSeq <= latestEventSeq()
+          msg.lastSeq <= latestEventSeq() &&
+          (clientServerLastSeq == null || msg.lastSeq <= clientServerLastSeq)
         );
 
         sendReplay(ws, canResume ? msg.lastSeq : null);

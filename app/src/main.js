@@ -121,6 +121,12 @@ function estimateCacheBytes(record) {
   return payload.length;
 }
 
+function buildCacheHtmlSnapshot() {
+  const snapshotRoot = $msgs.cloneNode(true);
+  snapshotRoot.querySelectorAll('[data-optimistic], .working-indicator').forEach(el => el.remove());
+  return snapshotRoot.innerHTML;
+}
+
 async function pruneChatCache() {
   let records;
   try {
@@ -235,7 +241,7 @@ const S = {
   currentGroupCount: 0,
   isAtBottom: true,
   waiting: false,
-  thinkingEl: null,
+  workingEl: null,
   cwd: '',
   model: '',
   mode: 'default',
@@ -570,12 +576,21 @@ $chat.addEventListener('scroll', () => {
   updateScrollBtn();
 });
 function scrollEnd() {
+  keepWorkingAtBottom();
   if (S.isAtBottom) requestAnimationFrame(() => { $chat.scrollTop = $chat.scrollHeight; });
 }
 
 // ============================================================
-//  Waiting / Thinking indicator
+//  Waiting / Working indicator
 // ============================================================
+function formatElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return m + 'm' + (rem > 0 ? rem + 's' : '');
+}
+
 function setWaiting(on) {
   S.waiting = on;
   if (on) {
@@ -588,22 +603,46 @@ function setWaiting(on) {
   $input.placeholder = on ? INPUT_PLACEHOLDER_WAITING : INPUT_PLACEHOLDER_DEFAULT;
   $('input-area').classList.toggle('waiting', on);
   if (on) {
-    removeThinkingIndicator();
+    removeWorkingIndicator();
     const el = document.createElement('div');
-    el.className = 'thinking-indicator';
-    el.innerHTML = '<div class="dot-pulse"><span></span><span></span><span></span></div><span>Thinking...</span>';
+    el.className = 'working-indicator';
+    el.innerHTML = '<div class="working-spinner"></div><span class="working-text">Thinking</span>';
     $msgs.appendChild(el);
-    S.thinkingEl = el;
+    S.workingEl = el;
     scrollEnd();
   } else {
-    removeThinkingIndicator();
+    showElapsedTime();
+    removeWorkingIndicator();
   }
   updateSendBtn();
 }
 
-function removeThinkingIndicator() {
-  if (S.thinkingEl && S.thinkingEl.parentNode) S.thinkingEl.remove();
-  S.thinkingEl = null;
+function switchToWorking() {
+  if (S.workingEl) {
+    const txt = S.workingEl.querySelector('.working-text');
+    if (txt) txt.textContent = 'Working';
+  }
+}
+
+function keepWorkingAtBottom() {
+  if (S.workingEl && S.workingEl.parentNode) {
+    $msgs.appendChild(S.workingEl);
+  }
+}
+
+function showElapsedTime() {
+  if (!S.waitStartedAt) return;
+  const elapsed = Date.now() - S.waitStartedAt;
+  if (elapsed < 1000) return;
+  const el = document.createElement('div');
+  el.className = 'elapsed-time';
+  el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span>${formatElapsed(elapsed)}</span>`;
+  $msgs.appendChild(el);
+}
+
+function removeWorkingIndicator() {
+  if (S.workingEl && S.workingEl.parentNode) S.workingEl.remove();
+  S.workingEl = null;
 }
 
 function updateSendBtn() {
@@ -646,7 +685,7 @@ function clearConversationUi() {
   S.currentGroupCount = 0;
   S.isAtBottom = true;
   S.waiting = false;
-  S.thinkingEl = null;
+  S.workingEl = null;
   S.waitStartedAt = 0;
   S.lastSeq = 0;
   S.pendingPerms = [];
@@ -728,6 +767,7 @@ async function restoreSessionCache(sessionId) {
   if (!record || !record.html) return false;
 
   $msgs.innerHTML = record.html;
+  $msgs.querySelectorAll('[data-optimistic], .working-indicator').forEach(el => el.remove());
   S.seenUuids = new Set(Array.isArray(record.seenUuids) ? record.seenUuids : []);
   S.lastSeq = Number.isInteger(record.lastSeq) ? record.lastSeq : 0;
   S.cwd = record.cwd || S.cwd;
@@ -738,7 +778,7 @@ async function restoreSessionCache(sessionId) {
     panelOpen: !!record.todoPanelOpen,
   });
   rebuildRuntimeStateFromDom();
-  removeThinkingIndicator();
+  removeWorkingIndicator();
   $input.disabled = false;
   $('btn-send').disabled = false;
   $('input-area').classList.remove('waiting');
@@ -750,6 +790,14 @@ async function restoreSessionCache(sessionId) {
   return true;
 }
 
+async function flushSessionCacheSave() {
+  if (S.cacheSaveTimer) {
+    clearTimeout(S.cacheSaveTimer);
+    S.cacheSaveTimer = null;
+  }
+  await persistSessionCache();
+}
+
 async function persistSessionCache() {
   if (!serverCacheAddr || !S.sessionId) return;
   const todoSnapshot = getTodoSnapshot();
@@ -757,7 +805,7 @@ async function persistSessionCache() {
     cacheKey: buildCacheKey(serverCacheAddr, S.sessionId),
     serverAddr,
     sessionId: S.sessionId,
-    html: $msgs.innerHTML,
+    html: buildCacheHtmlSnapshot(),
     seenUuids: Array.from(S.seenUuids),
     todoTasks: todoSnapshot.tasks,
     todoPanelOpen: todoSnapshot.panelOpen,
@@ -1088,8 +1136,8 @@ function processEvent(evt, seq) {
 
     if (evt.type === 'user' && evt.message) renderUser(evt);
     else if (evt.type === 'assistant' && evt.message) {
-      // Keep input locked while assistant turn is active; only remove spinner on first valid reply chunk.
-      if (S.waiting) removeThinkingIndicator();
+      // Switch from "Thinking" to "Working" on first assistant response
+      if (S.waiting) switchToWorking();
       renderAssistant(evt);
     }
     scrollEnd();
@@ -1722,11 +1770,14 @@ updateSendBtn();
 
 // Back button — disconnect and return to connect screen
 $('btn-back').addEventListener('click', () => {
-  S.intentionalDisconnect = true;
-  if (S.ws) S.ws.close();
-  if (S.reconnectTimer) { clearTimeout(S.reconnectTimer); S.reconnectTimer = null; }
-  resetAppState();
-  showConnectScreen();
+  (async () => {
+    S.intentionalDisconnect = true;
+    await flushSessionCacheSave().catch(() => {});
+    if (S.ws) S.ws.close();
+    if (S.reconnectTimer) { clearTimeout(S.reconnectTimer); S.reconnectTimer = null; }
+    resetAppState();
+    showConnectScreen();
+  })();
 });
 
 function resetAppState() {

@@ -730,27 +730,26 @@ header {
 }
 .compact-badge svg { opacity: .6; }
 
-/* ===== Thinking Indicator ===== */
-.thinking-indicator {
+/* ===== Working Indicator ===== */
+.working-indicator {
   display: flex; align-items: center; gap: 8px;
-  padding: 12px 0; animation: fadeUp .2s ease;
-  color: var(--text-muted); font-size: 14px;
+  padding: 10px 0; animation: fadeUp .2s ease;
+  color: var(--text-muted); font-size: 13px;
 }
-.thinking-indicator .dot-pulse {
-  display: inline-flex; align-items: center; gap: 3px;
+.working-spinner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
 }
-.thinking-indicator .dot-pulse span {
-  width: 5px; height: 5px; border-radius: 50%;
-  background: var(--accent);
-  animation: dotBounce 1.4s infinite ease-in-out both;
+
+/* ===== Elapsed Time Badge ===== */
+.elapsed-time {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 0; animation: fadeUp .2s ease;
+  color: var(--text-muted); font-size: 12px; opacity: .7;
 }
-.thinking-indicator .dot-pulse span:nth-child(1) { animation-delay: 0s; }
-.thinking-indicator .dot-pulse span:nth-child(2) { animation-delay: .16s; }
-.thinking-indicator .dot-pulse span:nth-child(3) { animation-delay: .32s; }
-@keyframes dotBounce {
-  0%,80%,100% { opacity:.25; transform:scale(.8); }
-  40% { opacity:1; transform:scale(1.1); }
-}
+.elapsed-time svg { opacity: .6; }
 
 /* ===== Input Disabled State ===== */
 #input-area.waiting .input-pill {
