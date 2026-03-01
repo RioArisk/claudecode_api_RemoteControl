@@ -1025,7 +1025,8 @@ function toolInputFull(name, input) {
 // ============================================================
 //  Diff Rendering
 // ============================================================
-function buildDiffHtml(oldStr, newStr, filePath) {
+function buildDiffHtml(oldStr, newStr, filePath, startLine) {
+  const lineOffset = (startLine || 1) - 1;
   const oldLines = (oldStr || '').split('\n');
   const newLines = (newStr || '').split('\n');
 
@@ -1034,7 +1035,7 @@ function buildDiffHtml(oldStr, newStr, filePath) {
   // Optimisation: limit to reasonable size to avoid O(m*n) blowup
   if (m * n > 500000) {
     // Fallback: show all old as deleted, all new as added
-    return buildDiffFallback(oldLines, newLines, filePath);
+    return buildDiffFallback(oldLines, newLines, filePath, lineOffset);
   }
 
   // Build LCS table
@@ -1062,17 +1063,18 @@ function buildDiffHtml(oldStr, newStr, filePath) {
   }
   ops.reverse();
 
-  return renderDiffOps(ops, filePath);
+  return renderDiffOps(ops, filePath, lineOffset);
 }
 
-function buildDiffFallback(oldLines, newLines, filePath) {
+function buildDiffFallback(oldLines, newLines, filePath, lineOffset) {
   const ops = [];
   oldLines.forEach((l, i) => ops.push({ type: 'del', text: l, oldLn: i + 1 }));
   newLines.forEach((l, i) => ops.push({ type: 'add', text: l, newLn: i + 1 }));
-  return renderDiffOps(ops, filePath);
+  return renderDiffOps(ops, filePath, lineOffset || 0);
 }
 
-function renderDiffOps(ops, filePath) {
+function renderDiffOps(ops, filePath, lineOffset) {
+  const off = lineOffset || 0;
   let addCount = 0, delCount = 0;
   ops.forEach(o => { if (o.type === 'add') addCount++; if (o.type === 'del') delCount++; });
 
@@ -1080,8 +1082,9 @@ function renderDiffOps(ops, filePath) {
   for (const o of ops) {
     const cls = o.type === 'del' ? 'diff-del' : o.type === 'add' ? 'diff-add' : 'diff-ctx';
     const sign = o.type === 'del' ? '-' : o.type === 'add' ? '+' : ' ';
-    // Single line number column: show the most relevant line number
-    const ln = o.type === 'del' ? (o.oldLn || '') : (o.newLn || o.oldLn || '');
+    // Single line number column with source file offset
+    const rawLn = o.type === 'del' ? (o.oldLn || '') : (o.newLn || o.oldLn || '');
+    const ln = rawLn !== '' ? rawLn + off : '';
     rows += `<tr class="${cls}"><td class="diff-ln">${ln}</td><td class="diff-sign">${sign}</td><td class="diff-code">${esc(o.text)}</td></tr>`;
   }
 
@@ -1500,7 +1503,7 @@ function renderTool(b) {
   // Edit tool: render diff view (no result text — pure diff only)
   const isEdit = b.name === 'Edit' && b.input && b.input.old_string !== undefined;
   if (isEdit) {
-    detail.innerHTML = buildDiffHtml(b.input.old_string, b.input.new_string, b.input.file_path);
+    detail.innerHTML = buildDiffHtml(b.input.old_string, b.input.new_string, b.input.file_path, b.input._startLine);
   } else {
     detail.innerHTML = `
       <div class="detail-input">${esc(inputFull)}</div>

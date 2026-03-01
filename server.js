@@ -957,6 +957,8 @@ function startTailing() {
               markExpectingSwitch();
             }
           }
+          // Enrich Edit tool_use blocks with source file start line
+          enrichEditStartLines(event);
           const record = { seq: ++eventSeq, event };
           eventBuffer.push(record);
           if (eventBuffer.length > EVENT_BUFFER_MAX) {
@@ -972,6 +974,28 @@ function startTailing() {
       // file might be temporarily locked
     }
   }, 300);
+}
+
+function enrichEditStartLines(event) {
+  const content = event.message && event.message.content;
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (block.type !== 'tool_use' || block.name !== 'Edit') continue;
+    const input = block.input;
+    if (!input || !input.file_path || input.old_string === undefined) continue;
+    try {
+      const filePath = path.resolve(CWD, input.file_path);
+      const src = fs.readFileSync(filePath, 'utf8');
+      // Search for new_string first (edit likely already applied), fallback to old_string
+      const needle = input.new_string || input.old_string;
+      const idx = src.indexOf(needle);
+      if (idx >= 0) {
+        input._startLine = src.substring(0, idx).split('\n').length;
+      }
+    } catch {
+      // file not readable — skip enrichment
+    }
+  }
 }
 
 function stopTailing() {

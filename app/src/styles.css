@@ -275,7 +275,7 @@ header {
 .thinking.open .thinking-content { display: block; }
 
 /* ===== Step Group (tool calls) ===== */
-.step-group { margin: 2px 0; animation: fadeUp .2s ease; }
+.step-group { margin: 0; animation: fadeUp .2s ease; }
 .step-group-header {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 0; cursor: pointer; user-select: none;
@@ -288,7 +288,7 @@ header {
   display: flex; align-items: center; justify-content: center;
 }
 .step-group.open .step-chevron { transform: rotate(90deg); }
-.step-list { display: none; padding: 4px 0; }
+.step-list { display: none; padding: 0; }
 .step-group.open .step-list { display: block; }
 
 /* ===== Step Item (single tool call) ===== */
@@ -358,7 +358,7 @@ header {
   font-size: 14px; opacity: .5;
 }
 .step-detail {
-  display: none; margin: 0 0 8px 0;
+  display: none; margin: 0 0 4px 0;
   background: var(--code-bg); border: 1px solid var(--border);
   border-radius: var(--radius-sm); overflow: hidden;
   animation: fadeUp .15s ease;
