@@ -4,7 +4,7 @@
 
 ## 这是什么？
 
-一个轻量级的远程控制桥接器，让你可以通过手机浏览器或 Android App 连接到电脑上运行的 Claude Code，实现：
+一个轻量级的远程控制桥接器，让你可以通过 Android App 连接到电脑上运行的 Claude Code，实现：
 
 - 💬 远程对话 —— 发消息、看回复、完整的 Markdown 渲染
 - 🔧 工具调用可视化 —— 实时查看 Claude 正在读哪个文件、执行什么命令
@@ -36,15 +36,55 @@ claude-remote
 PORT=8080 claude-remote
 ```
 
-### 3. 手机访问
+### 3. App 连接
 
-确保手机和电脑在同一局域网，浏览器打开：
+安装 Android App 后，在设置页输入服务器地址连接。根据你的网络环境，有以下三种方式：
+
+#### 方式一：局域网直连
+
+手机和电脑在同一 Wi-Fi 下，直接输入电脑内网 IP：
 
 ```
-http://<电脑IP>:3100
+ws://<电脑IP>:3100
 ```
 
-### 4. Android App（可选）
+> 适合在家或办公室使用，最简单、延迟最低。
+
+#### 方式二：Tailscale 组网
+
+通过 [Tailscale](https://tailscale.com) 虚拟局域网，手机和电脑不在同一网络也能连接。
+
+1. 电脑和手机都安装 Tailscale 并登录同一账号
+2. 在 Tailscale 管理面板查看电脑的 Tailscale IP（通常是 `100.x.x.x`）
+3. App 中输入：
+
+```
+ws://<Tailscale IP>:3100
+```
+
+> 适合跨网络使用，无需公网暴露，安全可靠。
+
+#### 方式三：Cloudflare Tunnel 公网访问
+
+通过 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) 将本地服务暴露到公网。
+
+1. 安装 `cloudflared` 并登录
+2. 启动隧道：
+
+```bash
+cloudflared tunnel --url http://localhost:3100
+```
+
+3. 获得一个 `https://xxx.trycloudflare.com` 的地址
+4. App 中输入（注意用 `wss://`）：
+
+```
+wss://xxx.trycloudflare.com
+```
+
+> 适合在外网或移动网络下远程控制，支持 HTTPS/WSS 加密。
+
+### 4. 编译 Android App
 
 ```bash
 cd app
@@ -53,14 +93,12 @@ npx tauri android init
 npx tauri android dev
 ```
 
-App 启动后输入 server 地址连接即可。
-
 ## 架构
 
 ```
 ┌─────────────┐     WebSocket     ┌──────────────┐     PTY      ┌────────────┐
-│  手机浏览器  │ ◄──────────────► │  server.js   │ ◄──────────► │ Claude Code│
-│  / App      │    ws://ip:3100   │  (Bridge)    │   node-pty   │   (CLI)    │
+│  Android App│ ◄──────────────► │  server.js   │ ◄──────────► │ Claude Code│
+│             │   ws://ip:3100   │  (Bridge)    │   node-pty   │   (CLI)    │
 └─────────────┘                   └──────────────┘              └────────────┘
                                         │
                                         │ 读取 JSONL transcript
@@ -86,7 +124,8 @@ App 启动后输入 server 地址连接即可。
 | 斜杠命令菜单 | 输入 `/` 弹出命令面板 |
 | 模型切换 | 底部面板选择，toast 即时反馈 |
 | 断线重连 | 自动重连 + 事件回放，不丢消息 |
-| 外部链接 | 点击链接跳转系统浏览器，不影响 WebView |
+| 图片上传 | 手机拍照/选图发送到 Claude Code |
+| 代码 Diff | GitHub 风格行内高亮 |
 | 安卓适配 | 安全区、虚拟键盘、大触摸目标 |
 
 ## 依赖
@@ -94,7 +133,7 @@ App 启动后输入 server 地址连接即可。
 - **Node.js** >= 18
 - **node-pty** —— PTY 终端模拟
 - **ws** —— WebSocket 服务
-- **Tauri 2.0** —— Android App（可选，需要 Rust 工具链）
+- **Tauri 2.0** —— Android App（需要 Rust 工具链）
 
 ## TODO
 
