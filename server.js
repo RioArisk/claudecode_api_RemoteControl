@@ -121,6 +121,7 @@ let switchWatcher = null;
 let expectingSwitch = false;
 let expectingSwitchTimer = null;
 let tailRemainder = Buffer.alloc(0);
+let tailCatchingUp = false; // true while reading historical transcript content
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
 const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
@@ -826,7 +827,16 @@ function attachTranscript(target, startOffset = 0) {
   eventBuffer = [];
   eventSeq = 0;
 
-  log(`Transcript attached: ${currentSessionId} (offset=${transcriptOffset})`);
+  // If transcript file already has content, mark as catching up so we don't
+  // broadcast working_started for historical user messages.
+  try {
+    const stat = fs.statSync(transcriptPath);
+    tailCatchingUp = stat.size > transcriptOffset;
+  } catch {
+    tailCatchingUp = false;
+  }
+
+  log(`Transcript attached: ${currentSessionId} (offset=${transcriptOffset} catchUp=${tailCatchingUp})`);
   broadcast({
     type: 'transcript_ready',
     transcript: transcriptPath,
@@ -886,7 +896,14 @@ function startTailing() {
     if (!transcriptPath) return;
     try {
       const stat = fs.statSync(transcriptPath);
-      if (stat.size <= transcriptOffset) return;
+      if (stat.size <= transcriptOffset) {
+        // Caught up to file end — initial catch-up phase is over
+        if (tailCatchingUp) {
+          tailCatchingUp = false;
+          log('Tail catch-up complete, live mode');
+        }
+        return;
+      }
 
       const fd = fs.openSync(transcriptPath, 'r');
       const buf = Buffer.alloc(stat.size - transcriptOffset);
@@ -905,7 +922,11 @@ function startTailing() {
           const event = JSON.parse(line);
           // Detect /clear from JSONL events (covers terminal direct input)
           if (event.type === 'user' || (event.message && event.message.role === 'user')) {
-            broadcast({ type: 'working_started' });
+            // Only broadcast working_started for live (new) user messages,
+            // not for historical events during catch-up.
+            if (!tailCatchingUp) {
+              broadcast({ type: 'working_started' });
+            }
             const content = event.message && event.message.content;
             if (typeof content === 'string' && /^\/clear\s*$/i.test(content.trim())) {
               markExpectingSwitch();
