@@ -6,9 +6,104 @@ const pty = require('node-pty');
 const { WebSocketServer, WebSocket } = require('ws');
 const { execSync } = require('child_process');
 
+// --- CLI argument parsing ---
+// Separate bridge args (CWD positional) from claude passthrough flags.
+// Usage: claude-remote [cwd] [--claude-flags...]
+// Example: claude-remote --resume xxx
+//          claude-remote /path/to/project --resume xxx -c
+const BLOCKED_FLAGS = new Set([
+  '--print', '-p',                   // non-interactive mode, breaks PTY bridge
+  '--output-format',                 // requires --print
+  '--input-format',                  // requires --print
+  '--include-partial-messages',      // requires --print
+  '--json-schema',                   // requires --print
+  '--no-session-persistence',        // requires --print
+  '--max-budget-usd',               // requires --print
+  '--max-turns',                     // requires --print
+  '--fallback-model',               // requires --print
+  '--permission-prompt-tool',        // conflicts with bridge approval hooks
+  '--version', '-v',                 // exits immediately
+  '--help', '-h',                    // exits immediately
+  '--init-only',                     // exits immediately
+  '--maintenance',                   // exits immediately
+]);
+
+// Flags that consume the next argument as a value
+const FLAGS_WITH_VALUE = new Set([
+  '--resume', '-r', '--session-id', '--from-pr', '--model',
+  '--system-prompt', '--system-prompt-file',
+  '--append-system-prompt', '--append-system-prompt-file',
+  '--permission-mode', '--add-dir', '--worktree', '-w',
+  '--mcp-config', '--settings', '--setting-sources',
+  '--agent', '--agents', '--teammate-mode',
+  '--allowedTools', '--disallowedTools', '--tools',
+  '--betas', '--debug', '--plugin-dir',
+  // blocked but still need to consume their values when filtering
+  '--output-format', '--input-format', '--json-schema',
+  '--max-budget-usd', '--max-turns', '--fallback-model',
+  '--permission-prompt-tool',
+]);
+
+function parseCliArgs(argv) {
+  const rawArgs = argv.slice(2);
+  let cwd = null;
+  const claudeArgs = [];
+  const blocked = [];
+
+  let i = 0;
+  while (i < rawArgs.length) {
+    const arg = rawArgs[i];
+
+    if (arg === '--') {
+      // Everything after -- is passed to claude
+      claudeArgs.push(...rawArgs.slice(i + 1));
+      break;
+    }
+
+    if (!arg.startsWith('-')) {
+      // Positional arg → treat first one as CWD (backward compatible)
+      if (!cwd) {
+        cwd = arg;
+      } else {
+        claudeArgs.push(arg);
+      }
+      i++;
+      continue;
+    }
+
+    // Handle --flag=value syntax
+    const eqIdx = arg.indexOf('=');
+    const flagName = eqIdx > 0 ? arg.substring(0, eqIdx) : arg;
+
+    if (BLOCKED_FLAGS.has(flagName)) {
+      blocked.push(flagName);
+      if (eqIdx > 0) {
+        // --flag=value, already consumed
+      } else if (FLAGS_WITH_VALUE.has(flagName) && i + 1 < rawArgs.length) {
+        i++; // skip the value too
+      }
+      i++;
+      continue;
+    }
+
+    // Pass through to claude
+    claudeArgs.push(arg);
+    // If this flag takes a value and it's not in --flag=value form, grab next arg
+    if (eqIdx < 0 && FLAGS_WITH_VALUE.has(flagName) && i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith('-')) {
+      i++;
+      claudeArgs.push(rawArgs[i]);
+    }
+    i++;
+  }
+
+  return { cwd: cwd || process.cwd(), claudeArgs, blocked };
+}
+
+const { cwd: _parsedCwd, claudeArgs: CLAUDE_EXTRA_ARGS, blocked: _blockedArgs } = parseCliArgs(process.argv);
+
 // --- Config ---
 const PORT = parseInt(process.env.PORT || '3100', 10);
-const CWD = process.argv[2] || process.cwd();
+const CWD = _parsedCwd;
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
 
@@ -20,13 +115,11 @@ let transcriptOffset = 0;
 let eventBuffer = [];
 let eventSeq = 0;
 const EVENT_BUFFER_MAX = 5000;
+let nextWsId = 0;
 let tailTimer = null;
-let discoveryTimer = null;
 let switchWatcher = null;
 let expectingSwitch = false;
 let expectingSwitchTimer = null;
-let preExistingFiles = new Set();
-let preExistingFileSizes = new Map();
 let tailRemainder = Buffer.alloc(0);
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
@@ -46,6 +139,75 @@ fs.writeFileSync(LOG_FILE, `--- Bridge started ${new Date().toISOString()} ---\n
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
   fs.appendFileSync(LOG_FILE, line);
+}
+
+function wsLabel(ws) {
+  const clientId = ws && ws._clientInstanceId ? ` client=${ws._clientInstanceId}` : '';
+  return `ws#${ws && ws._bridgeId ? ws._bridgeId : '?'}${clientId}`;
+}
+
+function sendWs(ws, msg, context = '') {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(msg));
+  if (msg.type === 'status' || msg.type === 'transcript_ready' || msg.type === 'replay_done') {
+    const extra = [];
+    if (msg.sessionId !== undefined) extra.push(`session=${msg.sessionId ?? 'null'}`);
+    if (msg.lastSeq !== undefined) extra.push(`lastSeq=${msg.lastSeq}`);
+    if (msg.resumed !== undefined) extra.push(`resumed=${msg.resumed}`);
+    log(`Send ${msg.type}${context ? ` (${context})` : ''} -> ${wsLabel(ws)}${extra.length ? ` ${extra.join(' ')}` : ''}`);
+  }
+  return true;
+}
+
+function normalizeFsPath(value) {
+  const resolved = path.resolve(String(value || ''));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function projectTranscriptDir() {
+  return path.join(PROJECTS_DIR, getProjectSlug(CWD));
+}
+
+function resolveHookTranscript(data) {
+  if (!data || typeof data !== 'object') return null;
+
+  const hookCwd = data.cwd ? path.resolve(String(data.cwd)) : '';
+  if (hookCwd && normalizeFsPath(hookCwd) !== normalizeFsPath(CWD)) return null;
+
+  const sessionId = data.session_id ? String(data.session_id) : '';
+  const expectedDir = projectTranscriptDir();
+  const transcriptPath = data.transcript_path ? path.resolve(String(data.transcript_path)) : '';
+
+  if (transcriptPath) {
+    const transcriptDir = path.dirname(transcriptPath);
+    const transcriptSessionId = path.basename(transcriptPath, '.jsonl');
+    const dirMatches = normalizeFsPath(transcriptDir) === normalizeFsPath(expectedDir);
+    const idMatches = !sessionId || transcriptSessionId === sessionId;
+    if (dirMatches && idMatches) {
+      return { full: transcriptPath, sessionId: transcriptSessionId };
+    }
+  }
+
+  if (!sessionId) return null;
+  return { full: path.join(expectedDir, `${sessionId}.jsonl`), sessionId };
+}
+
+function maybeAttachHookSession(data, source) {
+  const target = resolveHookTranscript(data);
+  if (!target) return;
+
+  if (currentSessionId === target.sessionId && transcriptPath &&
+      normalizeFsPath(transcriptPath) === normalizeFsPath(target.full)) {
+    return;
+  }
+
+  if (currentSessionId && currentSessionId !== target.sessionId && !expectingSwitch) {
+    log(`Ignored hook session from ${source}: ${target.sessionId} (current=${currentSessionId})`);
+    return;
+  }
+
+  log(`Hook session attached from ${source}: ${target.sessionId}`);
+  attachTranscript({ full: target.full }, 0);
 }
 
 // ============================================================
@@ -74,6 +236,8 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ decision: 'ask' }));
         return;
       }
+
+      maybeAttachHookSession(data, 'pre-tool-use');
 
       if (ALWAYS_AUTO_ALLOW.has(data.tool_name)) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -128,12 +292,29 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // --- API: Session start hook endpoint ---
+  if (req.method === 'POST' && url === '/hook/session-start') {
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', () => {
+      try {
+        maybeAttachHookSession(JSON.parse(body), 'session-start');
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+    return;
+  }
+
   // --- API: Stop hook endpoint ---
   if (req.method === 'POST' && url === '/hook/stop') {
     let body = '';
     req.on('data', chunk => (body += chunk));
     req.on('end', () => {
       log('/hook/stop received — broadcasting turn_complete');
+      try {
+        maybeAttachHookSession(JSON.parse(body), 'stop');
+      } catch {}
       broadcast({ type: 'turn_complete' });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{}');
@@ -162,8 +343,15 @@ const wss = new WebSocketServer({ server });
 
 function broadcast(msg) {
   const raw = JSON.stringify(msg);
+  const recipients = [];
   for (const ws of wss.clients) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(raw);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(raw);
+      recipients.push(wsLabel(ws));
+    }
+  }
+  if (msg.type === 'working_started' || msg.type === 'turn_complete' || msg.type === 'status' || msg.type === 'transcript_ready') {
+    log(`Broadcast ${msg.type} -> ${recipients.length} client(s)${recipients.length ? ` [${recipients.join(', ')}]` : ''}`);
   }
 }
 
@@ -178,6 +366,8 @@ function sendReplay(ws, lastSeq = null) {
     ? eventBuffer.filter(record => record.seq > replayFrom)
     : eventBuffer;
 
+  log(`Replay start -> ${wsLabel(ws)} from=${replayFrom} count=${records.length} currentSession=${currentSessionId ?? 'null'}`);
+
   for (const record of records) {
     ws.send(JSON.stringify({
       type: 'log_event',
@@ -186,12 +376,12 @@ function sendReplay(ws, lastSeq = null) {
     }));
   }
 
-  ws.send(JSON.stringify({
+  sendWs(ws, {
     type: 'replay_done',
     sessionId: currentSessionId,
     lastSeq: latestEventSeq(),
     resumed: normalizedLastSeq != null,
-  }));
+  }, 'sendReplay');
 }
 
 function sendUploadStatus(ws, uploadId, status, extra = {}) {
@@ -237,23 +427,27 @@ setInterval(() => {
   }
 }, 60 * 1000).unref();
 
-wss.on('connection', (ws) => {
-  ws.send(JSON.stringify({
+wss.on('connection', (ws, req) => {
+  ws._bridgeId = ++nextWsId;
+  ws._clientInstanceId = '';
+  log(`WS connected: ${wsLabel(ws)} remote=${req.socket.remoteAddress || '?'} ua=${JSON.stringify(req.headers['user-agent'] || '')}`);
+
+  sendWs(ws, {
     type: 'status',
     status: claudeProc ? 'running' : 'starting',
     hasTranscript: !!transcriptPath,
     cwd: CWD,
     sessionId: currentSessionId,
     lastSeq: latestEventSeq(),
-  }));
+  }, 'initial');
 
   if (currentSessionId) {
-    ws.send(JSON.stringify({
+    sendWs(ws, {
       type: 'transcript_ready',
       transcript: transcriptPath,
       sessionId: currentSessionId,
       lastSeq: latestEventSeq(),
-    }));
+    }, 'initial');
   }
 
   // New clients should explicitly request a resume window. Keep a delayed
@@ -270,6 +464,14 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(raw); } catch { return; }
 
     switch (msg.type) {
+      case 'hello':
+        ws._clientInstanceId = String(msg.clientInstanceId || ws._clientInstanceId || '');
+        log(`WS hello from ${wsLabel(ws)} page=${JSON.stringify(msg.page || '')} ua=${JSON.stringify(msg.userAgent || '')}`);
+        break;
+      case 'debug_log':
+        if (msg.clientInstanceId) ws._clientInstanceId = String(msg.clientInstanceId);
+        log(`ClientDebug ${wsLabel(ws)} event=${msg.event || 'unknown'} detail=${JSON.stringify(msg.detail || {})}`);
+        break;
       case 'resume': {
         ws._resumeHandled = true;
         if (ws._legacyReplayTimer) {
@@ -298,6 +500,8 @@ wss.on('connection', (ws) => {
           msg.lastSeq <= latestEventSeq() &&
           (clientServerLastSeq == null || msg.lastSeq <= clientServerLastSeq)
         );
+
+        log(`Resume request from ${wsLabel(ws)} session=${msg.sessionId ?? 'null'} lastSeq=${msg.lastSeq} serverLastSeq=${clientServerLastSeq ?? 'null'} canResume=${canResume}`);
 
         sendReplay(ws, canResume ? msg.lastSeq : null);
         break;
@@ -502,6 +706,7 @@ wss.on('connection', (ws) => {
       clearTimeout(ws._legacyReplayTimer);
       ws._legacyReplayTimer = null;
     }
+    log(`WS closed: ${wsLabel(ws)}`);
     cleanupClientUploads(ws);
   });
 });
@@ -510,13 +715,14 @@ wss.on('connection', (ws) => {
 //  4. PTY Manager — local terminal passthrough
 // ============================================================
 function spawnClaude() {
-  snapshotExistingFiles();
-
   const isWin = process.platform === 'win32';
   const shell = isWin ? 'powershell.exe' : (process.env.SHELL || '/bin/bash');
+  const claudeCmd = CLAUDE_EXTRA_ARGS.length > 0
+    ? `claude ${CLAUDE_EXTRA_ARGS.join(' ')}`
+    : 'claude';
   const args = isWin
-    ? ['-NoLogo', '-NoProfile', '-Command', 'claude']
-    : ['-c', 'claude'];
+    ? ['-NoLogo', '-NoProfile', '-Command', claudeCmd]
+    : ['-c', claudeCmd];
 
   // Use local terminal size if available, otherwise default
   const cols = isTTY ? process.stdout.columns : 120;
@@ -530,7 +736,7 @@ function spawnClaude() {
     env: { ...process.env, FORCE_COLOR: '1', BRIDGE_PORT: String(PORT) },
   });
 
-  log(`Claude spawned (pid ${claudeProc.pid}) — ${cols}x${rows}`);
+  log(`Claude spawned (pid ${claudeProc.pid}) — ${cols}x${rows} cmd="${claudeCmd}"`);
   broadcast({ type: 'status', status: 'running', pid: claudeProc.pid });
 
   // === PTY output → local terminal + WebSocket + mode detection ===
@@ -625,81 +831,8 @@ function attachTranscript(target, startOffset = 0) {
     sessionId: currentSessionId,
     lastSeq: 0,
   });
-
-  if (discoveryTimer) {
-    clearInterval(discoveryTimer);
-    discoveryTimer = null;
-  }
   startTailing();
   startSwitchWatcher();
-}
-
-function snapshotExistingFiles() {
-  const slug = getProjectSlug(CWD);
-  const projectDir = path.join(PROJECTS_DIR, slug);
-  preExistingFiles.clear();
-  preExistingFileSizes.clear();
-  try {
-    if (fs.existsSync(projectDir)) {
-      for (const f of fs.readdirSync(projectDir)) {
-        if (!f.endsWith('.jsonl')) continue;
-        const full = path.join(projectDir, f);
-        const stat = fs.statSync(full);
-        preExistingFiles.add(f);
-        preExistingFileSizes.set(f, stat.size);
-      }
-    }
-  } catch {}
-  log(`Pre-existing transcripts: ${preExistingFiles.size} files`);
-}
-
-function startDiscovery() {
-  const slug = getProjectSlug(CWD);
-  const projectDir = path.join(PROJECTS_DIR, slug);
-  log(`Watching for NEW transcript in: ${projectDir}`);
-
-  discoveryTimer = setInterval(() => {
-    if (!fs.existsSync(projectDir)) return;
-
-    try {
-      const targets = fs.readdirSync(projectDir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => {
-          const full = path.join(projectDir, f);
-          const stat = fs.statSync(full);
-          return {
-            name: f,
-            full,
-            mtime: stat.mtimeMs,
-            size: stat.size,
-          };
-        })
-        .sort((a, b) => b.mtime - a.mtime);
-
-      const newTargets = targets.filter(t => !preExistingFiles.has(t.name));
-      const newTranscript = newTargets.find(t => fileLooksLikeTranscript(t.full));
-      if (newTranscript) {
-        log(`NEW transcript found: ${path.basename(newTranscript.full, '.jsonl')}`);
-        attachTranscript(newTranscript, 0);
-        return;
-      }
-
-      for (const t of newTargets) {
-        preExistingFiles.add(t.name);
-        preExistingFileSizes.set(t.name, t.size);
-      }
-
-      // Fallback: reuse a pre-existing transcript if it keeps growing.
-      const grownTargets = targets.filter(t => t.size > (preExistingFileSizes.get(t.name) || 0));
-      const grownTranscript = grownTargets.find(t => fileLooksLikeTranscript(t.full));
-      if (grownTranscript) {
-        const baseOffset = preExistingFileSizes.get(grownTranscript.name) || 0;
-        log(`Reusing growing transcript: ${path.basename(grownTranscript.full, '.jsonl')} (from offset ${baseOffset})`);
-        attachTranscript(grownTranscript, baseOffset);
-        return;
-      }
-    } catch {}
-  }, 500);
 }
 
 function markExpectingSwitch() {
@@ -795,7 +928,6 @@ function startTailing() {
 
 function stopTailing() {
   if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
-  if (discoveryTimer) { clearInterval(discoveryTimer); discoveryTimer = null; }
   if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
   if (expectingSwitchTimer) { clearTimeout(expectingSwitchTimer); expectingSwitchTimer = null; }
   expectingSwitch = false;
@@ -938,6 +1070,22 @@ function setupHooks() {
   }
   settings.hooks.Stop = existingStop;
 
+  const sessionStartScript = path.resolve(__dirname, 'hooks', 'bridge-session-start.js').replace(/\\/g, '/');
+  const sessionStartCmd = `node "${sessionStartScript}"`;
+  const existingSessionStart = settings.hooks.SessionStart || [];
+  const sessionStartBridgeIdx = existingSessionStart.findIndex(e =>
+    e.hooks?.some(h => h.command?.includes('bridge-session-start'))
+  );
+  const sessionStartEntry = {
+    hooks: [{ type: 'command', command: sessionStartCmd, timeout: 10 }],
+  };
+  if (sessionStartBridgeIdx >= 0) {
+    existingSessionStart[sessionStartBridgeIdx] = sessionStartEntry;
+  } else {
+    existingSessionStart.push(sessionStartEntry);
+  }
+  settings.hooks.SessionStart = existingSessionStart;
+
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   log(`Hooks configured: ${settingsPath}`);
 }
@@ -960,19 +1108,26 @@ server.listen(PORT, '0.0.0.0', () => {
   const lan = `http://${lanIp}:${PORT}`;
 
   // Print banner to stdout BEFORE PTY takes over
-  process.stdout.write(`
+  let banner = `
   Claude Remote Control Bridge
   ─────────────────────────────
   Local:  ${local}
   LAN:    ${lan}
   CWD:    ${CWD}
   Log:    ${LOG_FILE}
-
+`;
+  if (CLAUDE_EXTRA_ARGS.length > 0) {
+    banner += `  Args:   claude ${CLAUDE_EXTRA_ARGS.join(' ')}\n`;
+  }
+  if (_blockedArgs.length > 0) {
+    banner += `  Blocked: ${_blockedArgs.join(', ')} (incompatible with bridge)\n`;
+  }
+  banner += `
   Phone:  ${lan}
   ─────────────────────────────
 
-`);
+`;
+  process.stdout.write(banner);
   setupHooks();
   spawnClaude();
-  startDiscovery();
 });

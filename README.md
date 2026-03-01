@@ -30,6 +30,29 @@ claude-remote
 
 会在当前目录启动 Claude Code 并开启远程控制服务（默认端口 3100）。
 
+#### 参数透传
+
+`claude-remote` 支持将参数直接传递给 Claude Code CLI：
+
+```bash
+# 恢复指定会话
+claude-remote --resume <session-id>
+
+# 继续最近的对话
+claude-remote -c
+
+# 指定模型
+claude-remote --model opus
+
+# 组合使用
+claude-remote --model sonnet -c
+
+# 指定工作目录 + 恢复会话
+claude-remote /path/to/project --resume abc123
+```
+
+> 不兼容参数（`--print`、`--output-format`、`--version` 等非交互模式参数）会被自动过滤并在启动 banner 中提示。
+
 指定端口：
 
 ```bash
@@ -149,4 +172,7 @@ npx tauri android dev
 - [x] /命令指令及样式美化
 - [x] npm 包化 —— `npm install -g claude-remote` 全局安装，`claude-remote` 一键启动
 - [x] AI 截图显示 —— 工具返回的图片（如 Playwright 截图）全宽渲染，点击全屏查看
+- [x] CLI 参数透传 —— `claude-remote --resume xxx` 等参数直接传给 Claude Code，自动过滤不兼容参数
+- [x] 多客户端同步 —— 多台设备同时连接，Working 状态和消息实时同步
+- [x] 会话生命周期管理 —— 通过 SessionStart Hook 自动绑定会话 ID，支持 /clear 切换检测
 - [ ] Tool Use 状态渲染（进行中 / 成功 / 失败）

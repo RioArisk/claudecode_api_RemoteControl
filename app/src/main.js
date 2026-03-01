@@ -226,6 +226,41 @@ function showApp() {
   renderHistory();
 }
 
+const CLIENT_INSTANCE_KEY = 'claude_remote_client_instance_id';
+
+function getClientInstanceId() {
+  const fallback = `client_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    let id = sessionStorage.getItem(CLIENT_INSTANCE_KEY);
+    if (!id) {
+      id = fallback;
+      sessionStorage.setItem(CLIENT_INSTANCE_KEY, id);
+    }
+    return id;
+  } catch {
+    return fallback;
+  }
+}
+
+const CLIENT_INSTANCE_ID = getClientInstanceId();
+let debugLogSeq = 0;
+
+function debugLog(event, detail = {}) {
+  const payload = {
+    clientInstanceId: CLIENT_INSTANCE_ID,
+    event,
+    detail,
+    seq: ++debugLogSeq,
+    ts: new Date().toISOString(),
+  };
+  console.log('[bridge-debug]', payload);
+  try {
+    if (typeof S !== 'undefined' && S.ws && S.ws.readyState === WebSocket.OPEN) {
+      S.ws.send(JSON.stringify({ type: 'debug_log', ...payload }));
+    }
+  } catch {}
+}
+
 // ============================================================
 //  App State
 // ============================================================
@@ -589,7 +624,14 @@ function formatElapsed(ms) {
   return m + 'm' + (rem > 0 ? rem + 's' : '');
 }
 
-function setWaiting(on) {
+function setWaiting(on, reason = '') {
+  debugLog(on ? 'waiting_on' : 'waiting_off', {
+    reason,
+    waitingBefore: S.waiting,
+    sessionId: S.sessionId || null,
+    lastSeq: S.lastSeq,
+    replaying: S.replaying,
+  });
   S.waiting = on;
   if (on) {
     S.waitStartedAt = Date.now();
@@ -668,6 +710,12 @@ function getWelcomeMarkup() {
 }
 
 function clearConversationUi() {
+  debugLog('clear_conversation_ui', {
+    waiting: S.waiting,
+    sessionId: S.sessionId || null,
+    lastSeq: S.lastSeq,
+    replaying: S.replaying,
+  });
   if (S.cacheSaveTimer) {
     clearTimeout(S.cacheSaveTimer);
     S.cacheSaveTimer = null;
@@ -754,6 +802,7 @@ function restoreTodoSnapshot(snapshot) {
 }
 
 async function restoreSessionCache(sessionId) {
+  debugLog('restore_session_cache_start', { sessionId });
   if (!serverCacheAddr || !sessionId) return false;
 
   let record;
@@ -762,7 +811,10 @@ async function restoreSessionCache(sessionId) {
   } catch {
     return false;
   }
-  if (!record || !record.html) return false;
+  if (!record || !record.html) {
+    debugLog('restore_session_cache_miss', { sessionId });
+    return false;
+  }
 
   $msgs.innerHTML = record.html;
   $msgs.querySelectorAll('[data-optimistic], .working-indicator').forEach(el => el.remove());
@@ -784,6 +836,11 @@ async function restoreSessionCache(sessionId) {
   updateSendBtn();
   updateScrollBtn();
   requestAnimationFrame(() => { $chat.scrollTop = $chat.scrollHeight; });
+  debugLog('restore_session_cache_done', {
+    sessionId,
+    lastSeq: S.lastSeq,
+    waiting: S.waiting,
+  });
   return true;
 }
 
@@ -843,6 +900,15 @@ async function syncSessionState(sessionId, serverLastSeq) {
   const prevSessionId = S.sessionId;
   const nextSessionId = sessionId || '';
   const sessionChanged = nextSessionId !== prevSessionId;
+  debugLog('sync_session_start', {
+    syncToken,
+    prevSessionId: prevSessionId || null,
+    nextSessionId: nextSessionId || null,
+    sessionChanged,
+    serverLastSeq,
+    waiting: S.waiting,
+    lastSeq: S.lastSeq,
+  });
   S.replaying = true;
 
   if (sessionChanged) {
@@ -850,10 +916,18 @@ async function syncSessionState(sessionId, serverLastSeq) {
     S.model = '';
     const shouldKeepOptimisticUi = !prevSessionId && hasOptimisticBubble();
     if (shouldKeepOptimisticUi) {
+      debugLog('sync_session_keep_optimistic', {
+        syncToken,
+        nextSessionId: nextSessionId || null,
+      });
       rebuildRuntimeStateFromDom();
       updateHeaderInfo();
       scheduleSessionCacheSave();
     } else {
+      debugLog('sync_session_clear_ui', {
+        syncToken,
+        nextSessionId: nextSessionId || null,
+      });
       clearConversationUi();
     }
     if (nextSessionId && !shouldKeepOptimisticUi) {
@@ -868,6 +942,12 @@ async function syncSessionState(sessionId, serverLastSeq) {
   if (S.resumeRequestedFor === nextSessionId) return;
 
   S.resumeRequestedFor = nextSessionId;
+  debugLog('sync_session_resume_request', {
+    syncToken,
+    sessionId: nextSessionId || null,
+    lastSeq: nextSessionId ? S.lastSeq : 0,
+    serverLastSeq: Number.isInteger(serverLastSeq) ? serverLastSeq : null,
+  });
   S.ws.send(JSON.stringify({
     type: 'resume',
     sessionId: nextSessionId || null,
@@ -1284,7 +1364,7 @@ function renderCompactSummary(evt) {
   // Dismiss the command overlay
   hideCmdOverlay();
   $('input-area').classList.remove('waiting');
-  if (S.waiting) setWaiting(false);
+  if (S.waiting) setWaiting(false, 'compact_summary');
 
   // Collapse all previous messages into one indicator
   closeGroup();
@@ -1751,7 +1831,7 @@ $('image-file-input').addEventListener('change', async (e) => {
       const wasQueued = pendingImage.submitQueued;
       pendingImage.status = 'failed';
       updateImagePreviewUi();
-      if (wasQueued && S.waiting) setWaiting(false);
+      if (wasQueued && S.waiting) setWaiting(false, 'image_upload_failed');
     }
     showToast(err.message || 'Image upload failed');
   }
@@ -1796,6 +1876,12 @@ function send() {
   const t = $input.value.trim();
   const hasImage = !!pendingImage;
   if ((!t && !hasImage) || !S.ws || S.ws.readyState !== WebSocket.OPEN || S.waiting) return;
+  debugLog('send_invoked', {
+    hasImage,
+    textPreview: t.slice(0, 80),
+    sessionId: S.sessionId || null,
+    waiting: S.waiting,
+  });
 
   // Intercept slash commands typed directly (only when no image)
   if (!hasImage && /^\/[a-z]+$/i.test(t)) {
@@ -1830,7 +1916,7 @@ function send() {
   }
 
   $input.value = ''; $input.style.height = 'auto';
-  setWaiting(true);
+  setWaiting(true, 'local_send');
 
   if (hasImage && pendingImage.status === 'uploaded') {
     submitPendingImageUpload().catch(err => {
@@ -1838,7 +1924,7 @@ function send() {
         pendingImage.status = 'failed';
         updateImagePreviewUi();
       }
-      setWaiting(false);
+      setWaiting(false, 'image_submit_failed');
       showToast(err.message || 'Image submit failed');
     });
   }
@@ -1860,6 +1946,7 @@ function connect() {
   S.ws = ws;
   S.resumeRequestedFor = '';
   S.replaying = true;
+  debugLog('ws_connect_start', { serverWsUrl, sessionId: S.sessionId || null });
 
   const connectTimeout = setTimeout(() => {
     if (ws.readyState !== WebSocket.OPEN) {
@@ -1875,6 +1962,17 @@ function connect() {
     setStatus('connected');
     setConnBanner(false);
     showApp();
+    ws.send(JSON.stringify({
+      type: 'hello',
+      clientInstanceId: CLIENT_INSTANCE_ID,
+      page: location.pathname || '/',
+      userAgent: navigator.userAgent || '',
+    }));
+    debugLog('ws_open', {
+      sessionId: S.sessionId || null,
+      waiting: S.waiting,
+      replaying: S.replaying,
+    });
     // Sync approval mode to server
     ws.send(JSON.stringify({ type: 'set_approval_mode', mode: approvalMode }));
   };
@@ -1882,6 +1980,16 @@ function connect() {
   ws.onmessage = async e => {
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'status' || m.type === 'transcript_ready' || m.type === 'replay_done' ||
+        m.type === 'working_started' || m.type === 'turn_complete' || m.type === 'pty_exit') {
+      debugLog('ws_message', {
+        type: m.type,
+        sessionId: 'sessionId' in m ? (m.sessionId ?? null) : null,
+        lastSeq: Number.isInteger(m.lastSeq) ? m.lastSeq : null,
+        waiting: S.waiting,
+        replaying: S.replaying,
+      });
+    }
     try {
       if (m.type === 'pty_output') { /* ignored — no terminal panel */ }
       else if (m.type === 'log_event') processEvent(m.event, m.seq);
@@ -1901,12 +2009,12 @@ function connect() {
         if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
         if ('sessionId' in m) await syncSessionState(m.sessionId, m.lastSeq);
       }
-      else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false); }
+      else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false, 'pty_exit'); }
       else if (m.type === 'turn_complete') {
-        if (S.waiting) setWaiting(false);
+        if (S.waiting) setWaiting(false, 'turn_complete');
       }
       else if (m.type === 'working_started') {
-        if (!S.waiting) setWaiting(true);
+        if (!S.waiting) setWaiting(true, 'working_started');
       }
       else if (m.type === 'permission_request') showPermission(m);
       else if (m.type === 'clear_permissions') {
@@ -1922,6 +2030,12 @@ function connect() {
     clearTimeout(connectTimeout);
     setStatus('disconnected');
     S.resumeRequestedFor = '';
+    debugLog('ws_close', {
+      sessionId: S.sessionId || null,
+      waiting: S.waiting,
+      replaying: S.replaying,
+      intentionalDisconnect: S.intentionalDisconnect,
+    });
     for (const [uploadId, waiter] of S.uploadWaiters) {
       waiter.reject(new Error('Connection lost'));
       S.uploadWaiters.delete(uploadId);
@@ -1929,7 +2043,7 @@ function connect() {
     if (pendingImage && pendingImage.status !== 'submitted') {
       pendingImage.status = 'failed';
       updateImagePreviewUi();
-      if (S.waiting) setWaiting(false);
+      if (S.waiting) setWaiting(false, 'ws_close_pending_image');
     }
     if (S.intentionalDisconnect) return;
 
