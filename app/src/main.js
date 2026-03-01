@@ -1690,11 +1690,7 @@ function execCmd(cmd) {
 
 function sendSlashCmd(text) {
   if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
-  S.ws.send(JSON.stringify({ type: 'input', data: '\x1b' }));
-  setTimeout(() => {
-    if (S.ws?.readyState === WebSocket.OPEN)
-      S.ws.send(JSON.stringify({ type: 'chat', text }));
-  }, 100);
+  S.ws.send(JSON.stringify({ type: 'chat', text }));
 }
 
 // ============================================================
