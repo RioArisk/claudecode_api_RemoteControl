@@ -114,7 +114,6 @@ function estimateCacheBytes(record) {
     todoPanelOpen: !!record.todoPanelOpen,
     cwd: record.cwd || '',
     model: record.model || '',
-    mode: record.mode || '',
     lastSeq: record.lastSeq || 0,
     updatedAt: record.updatedAt || 0,
   });
@@ -244,7 +243,6 @@ const S = {
   workingEl: null,
   cwd: '',
   model: '',
-  mode: 'default',
   pendingPerms: [],
   waitStartedAt: 0,
   replaying: true,           // true during history replay, false after replay_done
@@ -772,7 +770,6 @@ async function restoreSessionCache(sessionId) {
   S.lastSeq = Number.isInteger(record.lastSeq) ? record.lastSeq : 0;
   S.cwd = record.cwd || S.cwd;
   S.model = record.model || '';
-  S.mode = record.mode || S.mode;
   restoreTodoSnapshot({
     tasks: Array.isArray(record.todoTasks) ? record.todoTasks : [],
     panelOpen: !!record.todoPanelOpen,
@@ -811,7 +808,6 @@ async function persistSessionCache() {
     todoPanelOpen: todoSnapshot.panelOpen,
     cwd: S.cwd,
     model: S.model,
-    mode: S.mode,
     lastSeq: S.lastSeq,
     updatedAt: Date.now(),
   };
@@ -1787,7 +1783,6 @@ function resetAppState() {
   S.sessionSyncToken = 0;
   S.cwd = '';
   S.model = '';
-  S.mode = 'default';
   S.pendingPerms = [];
   S.replaying = true;
   S.intentionalDisconnect = false;
@@ -1917,10 +1912,6 @@ function connect() {
       else if (m.type === 'clear_permissions') {
         S.pendingPerms = [];
         $('perm-overlay').classList.remove('visible');
-      }
-      else if (m.type === 'mode') {
-        S.mode = m.mode; updateHeaderInfo();
-        scheduleSessionCacheSave();
       }
     } catch (err) {
       console.error('[ws.onmessage]', err);

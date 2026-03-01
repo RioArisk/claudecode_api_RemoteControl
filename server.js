@@ -36,7 +36,6 @@ const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
 let approvalSeq = 0;
 const pendingApprovals = new Map();  // id → { res, timer }
 const pendingImageUploads = new Map();
-let currentMode = 'default';
 let approvalMode = 'default';  // 'default' | 'partial' | 'all'
 const ALWAYS_AUTO_ALLOW = new Set(['TaskCreate', 'TaskUpdate']);
 const PARTIAL_AUTO_ALLOW = new Set(['Read', 'Glob', 'Grep', 'Write', 'Edit']);
@@ -74,12 +73,6 @@ const server = http.createServer((req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ decision: 'ask' }));
         return;
-      }
-
-      // Track mode from hook payload
-      if (data.permission_mode && data.permission_mode !== currentMode) {
-        currentMode = data.permission_mode;
-        broadcast({ type: 'mode', mode: currentMode });
       }
 
       if (ALWAYS_AUTO_ALLOW.has(data.tool_name)) {
@@ -514,84 +507,6 @@ wss.on('connection', (ws) => {
 });
 
 // ============================================================
-//  3. PTY Mode Detection (ANSI side-channel parsing)
-// ============================================================
-let ptyTextBuf = '';
-
-function stripAnsi(s) {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1B(?:\[[\x20-\x3f]*[0-9;]*[A-Za-z]|\].*?(?:\x07|\x1B\\)|\([B0])/g, '');
-}
-
-function detectModeFromPTY(data) {
-  // Ink (Claude Code's TUI framework) redraws by sending cursor-up
-  // sequences (\x1B[<n>A) followed by new content.  When we detect a
-  // redraw we MUST clear the accumulated text buffer, otherwise stale
-  // mode keywords from previous renders linger and cause false matches.
-  if (/\x1B\[\d*A/.test(data)) {
-    ptyTextBuf = '';
-  }
-
-  ptyTextBuf += stripAnsi(data);
-  if (ptyTextBuf.length > 4000) ptyTextBuf = ptyTextBuf.slice(-2000);
-
-  const tail = ptyTextBuf.slice(-500);
-  const lc = tail.toLowerCase();
-
-  let detected = null;
-
-  // The status bar always contains "for shortcuts".
-  // (Older versions: "shift+tab to cycle", newer: "? for shortcuts")
-  const anchorIdx = Math.max(lc.lastIndexOf('for shortcuts'), lc.lastIndexOf('shift+tab'));
-
-  if (anchorIdx >= 0) {
-    // Inspect ~80 chars BEFORE and AFTER the anchor.
-    // The mode label can appear on either side depending on status bar layout:
-    //   "⏸ plan mode on  ? for shortcuts"   ← mode BEFORE anchor
-    //   "? for shortcuts  ⏵⏵ accept edits"  ← mode AFTER anchor
-    const before = lc.slice(Math.max(0, anchorIdx - 80), anchorIdx);
-    const after  = lc.slice(anchorIdx, Math.min(lc.length, anchorIdx + 80));
-    const win = before + after;
-    log(`Mode window: [${win}]`);
-
-    if (win.includes('plan')) {
-      detected = 'plan';
-    } else if (win.includes('accept')) {
-      detected = 'acceptEdits';
-    } else if (win.includes('bypass')) {
-      detected = 'bypassPermissions';
-    } else {
-      // Status bar present but no mode keyword → default
-      detected = 'default';
-    }
-  } else {
-    // No status-bar anchor — check for explicit toggle messages
-    // that Claude prints when mode changes (e.g. "⏸ plan mode on")
-    if (/plan mode on/i.test(lc) || /\u23F8\s*plan/i.test(tail)) {
-      detected = 'plan';
-    } else if (/accept edits on/i.test(lc) || /\u23F5\u23F5\s*accept/i.test(tail)) {
-      detected = 'acceptEdits';
-    } else if (/bypass.*on/i.test(lc)) {
-      detected = 'bypassPermissions';
-    }
-    // Check if buffer has status-bar content but anchor was mangled
-    // If we see mode indicators like ⏸ or ⏵⏵ without explicit text
-    else if (tail.includes('\u23F8')) {
-      detected = 'plan';
-    } else if (tail.includes('\u23F5\u23F5')) {
-      detected = 'acceptEdits';
-    }
-  }
-
-  if (detected && detected !== currentMode) {
-    currentMode = detected;
-    broadcast({ type: 'mode', mode: currentMode });
-    log(`Mode detected from PTY: ${currentMode}`);
-    ptyTextBuf = '';  // reset after detection
-  }
-}
-
-// ============================================================
 //  4. PTY Manager — local terminal passthrough
 // ============================================================
 function spawnClaude() {
@@ -622,7 +537,6 @@ function spawnClaude() {
   claudeProc.onData((data) => {
     if (isTTY) process.stdout.write(data);   // show in the terminal you ran the bridge from
     broadcast({ type: 'pty_output', data });  // push to WebUI
-    detectModeFromPTY(data);
   });
 
   // === Local terminal input → PTY ===
@@ -856,6 +770,7 @@ function startTailing() {
           const event = JSON.parse(line);
           // Detect /clear from JSONL events (covers terminal direct input)
           if (event.type === 'user' || (event.message && event.message.role === 'user')) {
+            broadcast({ type: 'working_started' });
             const content = event.message && event.message.content;
             if (typeof content === 'string' && /^\/clear\s*$/i.test(content.trim())) {
               markExpectingSwitch();
