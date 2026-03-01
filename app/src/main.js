@@ -1638,7 +1638,16 @@ const CMD_FEEDBACK = {
   '/help':    { toast: 'Loading help...', overlay: false },
 };
 
+function normalizeSlashCommandInput(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const match = value.match(/^(\/[^\s]+)/);
+  if (!match || match[0] !== value) return '';
+  return match[1].toLowerCase();
+}
+
 function execCmd(cmd) {
+  cmd = normalizeSlashCommandInput(cmd) || String(cmd || '').trim().toLowerCase();
   hideCmdMenu();
   $input.value = '';
   $input.style.height = 'auto';
@@ -1902,8 +1911,9 @@ function send() {
   });
 
   // Intercept slash commands typed directly (only when no image)
-  if (!hasImage && /^\/[a-z]+$/i.test(t)) {
-    execCmd(t);
+  const slashCommand = normalizeSlashCommandInput(t);
+  if (!hasImage && COMMANDS.some(command => command.name === slashCommand)) {
+    execCmd(slashCommand);
     return;
   }
 

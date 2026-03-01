@@ -120,6 +120,7 @@ let tailTimer = null;
 let switchWatcher = null;
 let expectingSwitch = false;
 let expectingSwitchTimer = null;
+let pendingSwitchTarget = null;
 let tailRemainder = Buffer.alloc(0);
 let tailCatchingUp = false; // true while reading historical transcript content
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
@@ -214,6 +215,10 @@ function maybeAttachHookSession(data, source) {
     if (currentSessionId && !expectingSwitch) {
       const currentHasContent = transcriptPath && fileLooksLikeTranscript(transcriptPath);
       if (!targetHasContent || currentHasContent) {
+        if (currentSessionId !== target.sessionId) {
+          pendingSwitchTarget = { ...target, seenAt: Date.now(), source };
+          log(`Queued pending session-start: ${target.sessionId} (current=${currentSessionId} currentHasContent=${currentHasContent} targetHasContent=${targetHasContent})`);
+        }
         log(`Ignored session-start: ${target.sessionId} (current=${currentSessionId} currentHasContent=${currentHasContent} targetHasContent=${targetHasContent})`);
         return;
       }
@@ -236,6 +241,31 @@ function maybeAttachHookSession(data, source) {
 
   log(`Hook session attached from ${source}: ${target.sessionId}`);
   attachTranscript({ full: target.full }, 0);
+}
+
+function maybeAttachPendingSwitchTarget(reason, requireReady = true) {
+  if (!pendingSwitchTarget) return false;
+  if ((Date.now() - pendingSwitchTarget.seenAt) > 15000) {
+    log(`Dropped stale pending switch target: ${pendingSwitchTarget.sessionId}`);
+    pendingSwitchTarget = null;
+    return false;
+  }
+  if (pendingSwitchTarget.sessionId === currentSessionId) {
+    pendingSwitchTarget = null;
+    return false;
+  }
+
+  if (requireReady && !fileLooksLikeTranscript(pendingSwitchTarget.full)) {
+    return false;
+  }
+
+  const target = pendingSwitchTarget;
+  pendingSwitchTarget = null;
+  log(`Attaching pending switch target from ${reason}: ${target.sessionId}`);
+  if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
+  if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
+  attachTranscript({ full: target.full }, 0);
+  return true;
 }
 
 // ============================================================
@@ -550,14 +580,14 @@ wss.on('connection', (ws, req) => {
         if (claudeProc) {
           const text = msg.text;
           log(`Chat input → PTY: "${text.substring(0, 80)}"`);
-          const isClear = /^\/clear\s*$/i.test(text.trim());
-          if (isClear) {
+          const slashCommand = extractSlashCommand(text);
+          if (slashCommand === '/clear') {
             markExpectingSwitch();
           }
           // Slash commands (e.g. /clear, /help, /compact) are internal CLI
           // commands, not AI turns — the stop hook will never fire, so don't
           // enter the waiting state.
-          if (!text.trim().startsWith('/')) {
+          if (!slashCommand) {
             broadcast({ type: 'working_started' });
           }
           claudeProc.write(text);
@@ -850,9 +880,34 @@ function fileLooksLikeTranscript(filePath) {
   return false;
 }
 
+function flattenUserContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map(block => {
+    if (!block || typeof block !== 'object') return '';
+    if (typeof block.text === 'string') return block.text;
+    if (typeof block.content === 'string') return block.content;
+    return '';
+  }).filter(Boolean).join('\n');
+}
+
+function extractSlashCommand(content) {
+  const text = flattenUserContent(content).trim();
+  if (!text) return '';
+
+  const commandTagMatch = text.match(/<command-name>\s*(\/[^\s<]+)\s*<\/command-name>/i);
+  if (commandTagMatch) return commandTagMatch[1].trim().toLowerCase();
+
+  const inlineMatch = text.match(/^(\/\S+)/);
+  return inlineMatch ? inlineMatch[1].trim().toLowerCase() : '';
+}
+
 function attachTranscript(target, startOffset = 0) {
   transcriptPath = target.full;
   currentSessionId = path.basename(transcriptPath, '.jsonl');
+  if (pendingSwitchTarget && pendingSwitchTarget.sessionId === currentSessionId) {
+    pendingSwitchTarget = null;
+  }
   transcriptOffset = Math.max(0, startOffset);
   tailRemainder = Buffer.alloc(0);
   eventBuffer = [];
@@ -893,6 +948,7 @@ function markExpectingSwitch() {
     log('Expecting-switch flag expired (no new transcript found)');
   }, 15000);
   log('Expecting session switch (/clear detected)');
+  if (maybeAttachPendingSwitchTarget('markExpectingSwitch')) return;
 }
 
 function startSwitchWatcher() {
@@ -930,6 +986,7 @@ function startSwitchWatcher() {
 function startTailing() {
   tailRemainder = Buffer.alloc(0);
   tailTimer = setInterval(() => {
+    if (maybeAttachPendingSwitchTarget('tail_pending_target')) return;
     if (!transcriptPath) return;
     try {
       const stat = fs.statSync(transcriptPath);
@@ -960,14 +1017,14 @@ function startTailing() {
           // Detect /clear from JSONL events (covers terminal direct input)
           if (event.type === 'user' || (event.message && event.message.role === 'user')) {
             const content = event.message && event.message.content;
-            const isSlashCmd = typeof content === 'string' && content.trim().startsWith('/');
+            const slashCommand = extractSlashCommand(content);
             // Only broadcast working_started for live (new) user messages,
             // not for historical events during catch-up, and not for slash
             // commands (which are CLI commands, not AI turns).
-            if (!tailCatchingUp && !isSlashCmd) {
+            if (!tailCatchingUp && !slashCommand) {
               broadcast({ type: 'working_started' });
             }
-            if (typeof content === 'string' && /^\/clear\s*$/i.test(content.trim())) {
+            if (slashCommand === '/clear') {
               markExpectingSwitch();
             }
           }
@@ -1017,6 +1074,7 @@ function stopTailing() {
   if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
   if (expectingSwitchTimer) { clearTimeout(expectingSwitchTimer); expectingSwitchTimer = null; }
   expectingSwitch = false;
+  pendingSwitchTarget = null;
   tailRemainder = Buffer.alloc(0);
 }
 
