@@ -2004,6 +2004,7 @@ function connect() {
       else if (m.type === 'image_upload_status') handleUploadStatus(m);
       else if (m.type === 'transcript_ready') {
         setStatus('connected');
+        if (S.waiting) setWaiting(false, 'transcript_ready');
         await syncSessionState(m.sessionId, m.lastSeq);
       }
       else if (m.type === 'replay_done') {
