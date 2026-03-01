@@ -1661,6 +1661,16 @@ function execCmd(cmd) {
     return;
   }
 
+  // /clear: immediately clear the conversation UI — don't wait for the
+  // server-side session switch detection, which may be slow or fail.
+  if (cmd === '/clear') {
+    clearConversationUi();
+    S.sessionId = '';
+    S.resumeRequestedFor = '';
+    sendSlashCmd(cmd);
+    return;
+  }
+
   const fb = CMD_FEEDBACK[cmd];
   if (fb) {
     if (fb.overlay) showCmdOverlay(fb.label);
