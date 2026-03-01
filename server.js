@@ -203,28 +203,32 @@ function maybeAttachHookSession(data, source) {
     return;
   }
 
-  // Switching to a different session — apply source-specific guards.
-  if (currentSessionId && currentSessionId !== target.sessionId && !expectingSwitch) {
-    const targetHasContent = fileLooksLikeTranscript(target.full);
+  const targetHasContent = fileLooksLikeTranscript(target.full);
 
-    if (source === 'session-start') {
-      // --resume triggers two session-start hooks in unpredictable order.
-      // Don't switch away from a transcript with conversation content to an
-      // empty one — the one with content is the real resumed session.
+  if (source === 'session-start') {
+    // session-start is unreliable for --resume (fires twice, one is a
+    // snapshot-only session). Only accept when:
+    // 1. No session bound yet (first attach), OR
+    // 2. Expecting a switch (/clear), OR
+    // 3. Target has conversation content and current doesn't
+    if (currentSessionId && !expectingSwitch) {
       const currentHasContent = transcriptPath && fileLooksLikeTranscript(transcriptPath);
-      if (currentHasContent && !targetHasContent) {
-        log(`Ignored hook session from ${source}: ${target.sessionId} (current has content, target empty)`);
+      if (!targetHasContent || currentHasContent) {
+        log(`Ignored session-start: ${target.sessionId} (current=${currentSessionId} currentHasContent=${currentHasContent} targetHasContent=${targetHasContent})`);
         return;
       }
-    } else if (source === 'pre-tool-use') {
-      // pre-tool-use is the most reliable signal — it comes from the actually
-      // running Claude process. Accept it if the transcript has content.
-      if (!targetHasContent) {
-        log(`Ignored hook session from ${source}: ${target.sessionId} (no conversation content)`);
-        return;
-      }
-    } else {
-      // Unknown source — block unexpected switches
+    }
+  } else if (source === 'pre-tool-use') {
+    // pre-tool-use is the authoritative source — comes from the actually
+    // running Claude process. Always allow it to correct the session,
+    // as long as the target transcript has conversation content.
+    if (currentSessionId && currentSessionId !== target.sessionId && !targetHasContent) {
+      log(`Ignored pre-tool-use: ${target.sessionId} (no conversation content)`);
+      return;
+    }
+  } else {
+    // Other sources (e.g. stop) — only accept if matching current or no session
+    if (currentSessionId && currentSessionId !== target.sessionId && !expectingSwitch) {
       log(`Ignored hook session from ${source}: ${target.sessionId} (current=${currentSessionId})`);
       return;
     }
