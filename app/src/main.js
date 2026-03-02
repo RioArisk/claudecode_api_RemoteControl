@@ -283,6 +283,7 @@ const S = {
   replaying: true,           // true during history replay, false after replay_done
   turnStateVersion: 0,
   pendingTurnState: null,
+  pendingPlanContent: '',
   reconnectTimer: null,
   intentionalDisconnect: false,
   resumeRequestedFor: '',
@@ -782,6 +783,7 @@ function clearConversationUi() {
   S.waitStartedAt = 0;
   S.lastSeq = 0;
   S.pendingPerms = [];
+  S.pendingPlanContent = '';
   questionQueue = [];
   currentQuestions = null;
   currentQuestionIdx = 0;
@@ -844,6 +846,7 @@ function restoreTodoSnapshot(snapshot) {
     todoState.tasks.set(String(taskId), task);
   });
   todoState.panelOpen = !!snapshot.panelOpen;
+  todoState.autoOpenedForBatch = todoState.tasks.size > 0;
   renderTodoPanel();
   $('todo-panel').classList.toggle('open', todoState.panelOpen && todoState.tasks.size > 0);
 }
@@ -1407,6 +1410,19 @@ function renderPlanCard(planContent) {
   $msgs.appendChild(el);
 }
 
+function normalizePlanContent(plan) {
+  return String(plan || '').trim();
+}
+
+function consumePendingPlanCard() {
+  const plan = normalizePlanContent(S.pendingPlanContent);
+  S.pendingPlanContent = '';
+  if (!plan) return;
+  renderPlanCard(plan);
+  scrollEnd();
+  scheduleSessionCacheSave();
+}
+
 // --- Compact Summary ---
 function renderCompactSummary(evt) {
   // Dismiss the command overlay
@@ -1458,7 +1474,12 @@ function renderAssistant(evt) {
         if (toolName === 'AskUserQuestion' && b.input && b.input.questions) {
           if (!S.replaying) showQuestion(b.input.questions);
         } else if (toolName === 'ExitPlanMode') {
-          if (!S.replaying) showPlanApproval(b.input);
+          if (S.replaying) {
+            const plan = normalizePlanContent(b.input?.plan || '');
+            if (plan) renderPlanCard(plan);
+          } else {
+            showPlanApproval(b.input);
+          }
         } else if (!HIDDEN_STEP_TOOLS.has(toolName)) {
           renderTool(b);
         }
@@ -1936,6 +1957,7 @@ function resetAppState() {
   S.sessionSyncToken = 0;
   S.turnStateVersion = 0;
   S.pendingTurnState = null;
+  S.pendingPlanContent = '';
   S.cwd = '';
   S.model = '';
   S.pendingPerms = [];
@@ -2338,7 +2360,8 @@ const PLAN_OPTIONS = [
 ];
 
 function showPlanApproval(input) {
-  const plan = input?.plan || '';
+  const plan = normalizePlanContent(input?.plan || '');
+  S.pendingPlanContent = plan;
   const contentEl = $('plan-content');
   if (plan) {
     contentEl.style.display = '';
@@ -2364,6 +2387,8 @@ function showPlanApproval(input) {
       // Option 1 triggers /clear inside Claude Code — notify server to expect session switch
       if (btn.dataset.num === '1') {
         S.ws.send(JSON.stringify({ type: 'expect_clear' }));
+      } else {
+        consumePendingPlanCard();
       }
       S.ws.send(JSON.stringify({ type: 'input', data: btn.dataset.num }));
       $('plan-overlay').classList.remove('visible');
@@ -2377,6 +2402,7 @@ function showPlanApproval(input) {
 function sendPlanOther() {
   const text = $('plan-other-input').value.trim();
   if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  consumePendingPlanCard();
   S.ws.send(JSON.stringify({ type: 'input', data: '4' }));
   setTimeout(() => {
     if (S.ws?.readyState === WebSocket.OPEN) {
@@ -2398,7 +2424,68 @@ const todoState = {
   tasks: new Map(),       // taskId -> { subject, description, status, activeForm, blockedBy, blocks }
   pendingCreates: new Map(), // tool_use_id -> input (waiting for tool_result to get taskId)
   panelOpen: false,
+  autoOpenedForBatch: false,
+  clearTimer: null,
 };
+
+const TODO_AUTO_CLEAR_DELAY_MS = 1800;
+
+function cancelTodoAutoClear() {
+  if (!todoState.clearTimer) return;
+  clearTimeout(todoState.clearTimer);
+  todoState.clearTimer = null;
+}
+
+function clearTodoBatch() {
+  cancelTodoAutoClear();
+  todoState.tasks.clear();
+  todoState.pendingCreates.clear();
+  todoState.panelOpen = false;
+  todoState.autoOpenedForBatch = false;
+  $('todo-panel').classList.remove('has-tasks', 'open');
+  $('todo-list').innerHTML = '';
+  $('todo-summary').textContent = '';
+  $('todo-progress-bar').style.width = '0%';
+  $('todo-progress-bar').classList.remove('all-done');
+  $('todo-badge').textContent = '0';
+  $('todo-badge').classList.remove('done');
+  scheduleSessionCacheSave();
+}
+
+function syncTodoPanelLifecycle(tasks) {
+  const hasTasks = tasks.length > 0;
+  const hasPendingCreates = todoState.pendingCreates.size > 0;
+  const hasOpenTasks = tasks.some(([, task]) => (task.status || 'pending') !== 'completed');
+
+  if (!hasTasks) {
+    cancelTodoAutoClear();
+    todoState.autoOpenedForBatch = false;
+    todoState.panelOpen = false;
+    return;
+  }
+
+  if (!todoState.autoOpenedForBatch) {
+    todoState.autoOpenedForBatch = true;
+    todoState.panelOpen = true;
+  }
+
+  if (hasOpenTasks || hasPendingCreates) {
+    cancelTodoAutoClear();
+    return;
+  }
+
+  if (!todoState.clearTimer) {
+    todoState.clearTimer = setTimeout(() => {
+      todoState.clearTimer = null;
+      const latestTasks = Array.from(todoState.tasks.values());
+      const latestHasPendingCreates = todoState.pendingCreates.size > 0;
+      const latestHasOpenTasks = latestTasks.some(task => (task.status || 'pending') !== 'completed');
+      if (!latestHasPendingCreates && latestTasks.length > 0 && !latestHasOpenTasks) {
+        clearTodoBatch();
+      }
+    }, TODO_AUTO_CLEAR_DELAY_MS);
+  }
+}
 
 function handleTodoToolUse(b) {
   const { name, id, input } = b;
@@ -2406,8 +2493,7 @@ function handleTodoToolUse(b) {
     // Claude's task panel starts a fresh batch after all tasks are done.
     const hasOpenTasks = Array.from(todoState.tasks.values()).some(t => t.status !== 'completed');
     if (todoState.tasks.size > 0 && !hasOpenTasks) {
-      todoState.tasks.clear();
-      renderTodoPanel();
+      clearTodoBatch();
     }
     todoState.pendingCreates.set(id, input);
   } else if (name === 'TaskUpdate' && input.taskId) {
@@ -2524,11 +2610,19 @@ function renderTodoPanel() {
   });
 
   if (tasks.length === 0) {
-    panel.classList.remove('has-tasks');
+    panel.classList.remove('has-tasks', 'open');
+    list.innerHTML = '';
+    $('todo-summary').textContent = '';
+    $('todo-progress-bar').style.width = '0%';
+    $('todo-progress-bar').classList.remove('all-done');
+    $('todo-badge').textContent = '0';
+    $('todo-badge').classList.remove('done');
     return;
   }
 
+  syncTodoPanelLifecycle(tasks);
   panel.classList.add('has-tasks');
+  panel.classList.toggle('open', todoState.panelOpen);
 
   const total = tasks.length;
   const completed = tasks.filter(([, t]) => t.status === 'completed').length;
@@ -2573,12 +2667,6 @@ function renderTodoPanel() {
     </div>`;
   }).join('');
 
-  // Auto-open on first task
-  if (!todoState.panelOpen && tasks.length > 0) {
-    todoState.panelOpen = true;
-    panel.classList.add('open');
-  }
-
   scrollEnd();
 }
 
@@ -2590,11 +2678,18 @@ function toggleTodoPanel() {
 }
 
 function resetTodoState() {
+  cancelTodoAutoClear();
   todoState.tasks.clear();
   todoState.pendingCreates.clear();
   todoState.panelOpen = false;
+  todoState.autoOpenedForBatch = false;
   $('todo-panel').classList.remove('has-tasks', 'open');
   $('todo-list').innerHTML = '';
+  $('todo-summary').textContent = '';
+  $('todo-progress-bar').style.width = '0%';
+  $('todo-progress-bar').classList.remove('all-done');
+  $('todo-badge').textContent = '0';
+  $('todo-badge').classList.remove('done');
 }
 
 // ============================================================
