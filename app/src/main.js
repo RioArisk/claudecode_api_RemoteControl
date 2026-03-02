@@ -281,6 +281,8 @@ const S = {
   pendingPerms: [],
   waitStartedAt: 0,
   replaying: true,           // true during history replay, false after replay_done
+  turnStateVersion: 0,
+  pendingTurnState: null,
   reconnectTimer: null,
   intentionalDisconnect: false,
   resumeRequestedFor: '',
@@ -696,6 +698,43 @@ function removeWorkingIndicator() {
 function updateSendBtn() {
   const empty = !$input.value.trim() && !pendingImage;
   $('btn-send').classList.toggle('empty', empty && !S.waiting);
+}
+
+function syncConfirmedModel(nextModel, { allowToast = false } = {}) {
+  const normalized = String(nextModel || '').trim();
+  if (!normalized) return false;
+
+  const prevModel = S.model || '';
+  if (prevModel === normalized) return false;
+
+  S.model = normalized;
+  updateHeaderInfo();
+
+  if (allowToast && !S.replaying && prevModel) {
+    showToast('Now using ' + formatModel(S.model));
+  }
+  return true;
+}
+
+function cacheTurnState(state) {
+  if (!state) return;
+  const nextVersion = Number.isInteger(state.version) ? state.version : 0;
+  const pendingVersion = Number.isInteger(S.pendingTurnState?.version) ? S.pendingTurnState.version : -1;
+  if (nextVersion < pendingVersion) return;
+  S.pendingTurnState = state;
+}
+
+function applyTurnState(state, reason = '') {
+  if (!state) return;
+  const nextVersion = Number.isInteger(state.version) ? state.version : 0;
+  if (nextVersion < S.turnStateVersion) return;
+  S.turnStateVersion = nextVersion;
+  S.pendingTurnState = null;
+
+  const shouldWait = state.phase === 'running';
+  if (S.waiting !== shouldWait) {
+    setWaiting(shouldWait, reason || `turn_state:${state.phase || 'idle'}`);
+  }
 }
 
 function updateScrollBtn() {
@@ -1209,13 +1248,6 @@ function processEvent(evt, seq) {
       const blocks = evt.message.content;
       if (Array.isArray(blocks) && blocks.length === 1 && blocks[0].type === 'text') {
         const txt = blocks[0].text;
-        const modelMatch = txt.match(/Set model to.*?\(([^)]+)\)/i) ||
-                            txt.replace(/\x1B\[[0-9;]*m/g, '').match(/Set model to.*?\(([^)]+)\)/i);
-        if (modelMatch) {
-          S.model = modelMatch[1];
-          updateHeaderInfo();
-          showToast('Model switched to ' + formatModel(S.model));
-        }
         if (isJunkContent(txt)) return;
       }
     }
@@ -1411,10 +1443,7 @@ function renderAssistant(evt) {
   const msgId = evt.message.id;
   const usage = evt.message.usage;
 
-  if (!S.model && evt.message.model) {
-    S.model = evt.message.model;
-    updateHeaderInfo();
-  }
+  syncConfirmedModel(evt.message.model, { allowToast: true });
 
   for (const b of blocks) {
     try {
@@ -1700,6 +1729,24 @@ function sendSlashCmd(text) {
   S.ws.send(JSON.stringify({ type: 'chat', text }));
 }
 
+function sendControlInput(data) {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  S.ws.send(JSON.stringify({ type: 'input', data: String(data) }));
+}
+
+function sendControlEnter() {
+  sendControlInput('\r');
+}
+
+function sendControlLine(text, { startDelayMs = 0, submitDelayMs = 120 } = {}) {
+  setTimeout(() => {
+    if (S.ws?.readyState === WebSocket.OPEN) sendControlInput(text);
+  }, startDelayMs);
+  setTimeout(() => {
+    if (S.ws?.readyState === WebSocket.OPEN) sendControlEnter();
+  }, startDelayMs + submitDelayMs);
+}
+
 // ============================================================
 //  Command Overlay (blocking spinner for /compact etc.)
 // ============================================================
@@ -1744,15 +1791,11 @@ function showModelPicker() {
       hideModelPicker();
       if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
       showToast('Switching to ' + (picked ? picked.label : 'model') + '...');
-      S.ws.send(JSON.stringify({ type: 'input', data: '\x1b' }));
+      sendControlInput('\x1b');
       setTimeout(() => {
-        if (S.ws?.readyState === WebSocket.OPEN)
-          S.ws.send(JSON.stringify({ type: 'chat', text: '/model' }));
-      }, 300);
-      setTimeout(() => {
-        if (S.ws?.readyState === WebSocket.OPEN)
-          S.ws.send(JSON.stringify({ type: 'chat', text: el.dataset.num }));
-      }, 2000);
+        if (S.ws?.readyState === WebSocket.OPEN) sendSlashCmd('/model');
+      }, 250);
+      sendControlLine(el.dataset.num, { startDelayMs: 2400, submitDelayMs: 140 });
     });
   });
 
@@ -1891,6 +1934,8 @@ function resetAppState() {
   S.sessionId = '';
   S.resumeRequestedFor = '';
   S.sessionSyncToken = 0;
+  S.turnStateVersion = 0;
+  S.pendingTurnState = null;
   S.cwd = '';
   S.model = '';
   S.pendingPerms = [];
@@ -1947,7 +1992,6 @@ function send() {
   }
 
   $input.value = ''; $input.style.height = 'auto';
-  setWaiting(true, 'local_send');
 
   if (hasImage && pendingImage.status === 'uploaded') {
     submitPendingImageUpload().catch(err => {
@@ -2012,7 +2056,7 @@ function connect() {
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
     if (m.type === 'status' || m.type === 'transcript_ready' || m.type === 'replay_done' ||
-        m.type === 'working_started' || m.type === 'turn_complete' || m.type === 'pty_exit') {
+        m.type === 'turn_state' || m.type === 'pty_exit') {
       debugLog('ws_message', {
         type: m.type,
         sessionId: 'sessionId' in m ? (m.sessionId ?? null) : null,
@@ -2027,13 +2071,13 @@ function connect() {
       else if (m.type === 'image_upload_status') handleUploadStatus(m);
       else if (m.type === 'transcript_ready') {
         setStatus('connected');
-        if (S.waiting) setWaiting(false, 'transcript_ready');
         await syncSessionState(m.sessionId, m.lastSeq);
       }
       else if (m.type === 'replay_done') {
         if (m.sessionId !== undefined && m.sessionId !== null) S.sessionId = m.sessionId;
         if (Number.isInteger(m.lastSeq) && m.lastSeq > S.lastSeq) S.lastSeq = m.lastSeq;
         S.replaying = false;
+        if (S.pendingTurnState) applyTurnState(S.pendingTurnState, 'replay_done');
         scheduleSessionCacheSave();
       }
       else if (m.type === 'status') {
@@ -2041,13 +2085,11 @@ function connect() {
         if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
         if ('sessionId' in m) await syncSessionState(m.sessionId, m.lastSeq);
       }
+      else if (m.type === 'turn_state') {
+        if (S.replaying) cacheTurnState(m);
+        else applyTurnState(m, 'turn_state');
+      }
       else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false, 'pty_exit'); }
-      else if (m.type === 'turn_complete') {
-        if (S.waiting) setWaiting(false, 'turn_complete');
-      }
-      else if (m.type === 'working_started') {
-        if (!S.waiting) setWaiting(true, 'working_started');
-      }
       else if (m.type === 'permission_request') showPermission(m);
       else if (m.type === 'clear_permissions') {
         S.pendingPerms = [];
@@ -2081,6 +2123,7 @@ function connect() {
     clearTimeout(connectTimeout);
     setStatus('disconnected');
     S.resumeRequestedFor = '';
+    S.pendingTurnState = null;
     debugLog('ws_close', {
       sessionId: S.sessionId || null,
       waiting: S.waiting,

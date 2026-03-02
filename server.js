@@ -129,6 +129,13 @@ let tailCatchingUp = false; // true while reading historical transcript content
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
 const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
+let turnStateVersion = 0;
+let turnState = {
+  phase: 'idle',
+  sessionId: null,
+  version: 0,
+  updatedAt: Date.now(),
+};
 let ttyInputForwarderAttached = false;
 let ttyInputHandler = null;
 let ttyResizeHandler = null;
@@ -157,13 +164,50 @@ function wsLabel(ws) {
 function sendWs(ws, msg, context = '') {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(msg));
-  if (msg.type === 'status' || msg.type === 'transcript_ready' || msg.type === 'replay_done') {
+  if (msg.type === 'status' || msg.type === 'transcript_ready' || msg.type === 'replay_done' || msg.type === 'turn_state') {
     const extra = [];
     if (msg.sessionId !== undefined) extra.push(`session=${msg.sessionId ?? 'null'}`);
     if (msg.lastSeq !== undefined) extra.push(`lastSeq=${msg.lastSeq}`);
     if (msg.resumed !== undefined) extra.push(`resumed=${msg.resumed}`);
+    if (msg.phase !== undefined) extra.push(`phase=${msg.phase}`);
+    if (msg.version !== undefined) extra.push(`version=${msg.version}`);
     log(`Send ${msg.type}${context ? ` (${context})` : ''} -> ${wsLabel(ws)}${extra.length ? ` ${extra.join(' ')}` : ''}`);
   }
+  return true;
+}
+
+function getTurnStatePayload() {
+  return {
+    type: 'turn_state',
+    phase: turnState.phase,
+    sessionId: turnState.sessionId,
+    version: turnState.version,
+    updatedAt: turnState.updatedAt,
+  };
+}
+
+function sendTurnState(ws, context = '') {
+  return sendWs(ws, getTurnStatePayload(), context);
+}
+
+function setTurnState(phase, { sessionId = currentSessionId, reason = '', force = false } = {}) {
+  const normalizedPhase = phase === 'running' ? 'running' : 'idle';
+  const normalizedSessionId = sessionId || null;
+  const changed = force ||
+    turnState.phase !== normalizedPhase ||
+    turnState.sessionId !== normalizedSessionId;
+
+  if (!changed) return false;
+
+  turnState = {
+    phase: normalizedPhase,
+    sessionId: normalizedSessionId,
+    version: ++turnStateVersion,
+    updatedAt: Date.now(),
+  };
+
+  log(`Turn state -> phase=${turnState.phase} session=${turnState.sessionId ?? 'null'} version=${turnState.version}${reason ? ` reason=${reason}` : ''}`);
+  broadcast(getTurnStatePayload());
   return true;
 }
 
@@ -414,6 +458,7 @@ const server = http.createServer((req, res) => {
       if (reason === 'clear') {
         markExpectingSwitch();
       }
+      setTurnState('idle', { reason: `session-end:${reason}` });
       broadcast({ type: 'session_end', reason });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{}');
@@ -430,7 +475,7 @@ const server = http.createServer((req, res) => {
       try {
         maybeAttachHookSession(JSON.parse(body), 'stop');
       } catch {}
-      broadcast({ type: 'turn_complete' });
+      setTurnState('idle', { reason: 'stop-hook' });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{}');
     });
@@ -465,7 +510,7 @@ function broadcast(msg) {
       recipients.push(wsLabel(ws));
     }
   }
-  if (msg.type === 'working_started' || msg.type === 'turn_complete' || msg.type === 'status' || msg.type === 'transcript_ready') {
+  if (msg.type === 'status' || msg.type === 'transcript_ready' || msg.type === 'turn_state') {
     log(`Broadcast ${msg.type} -> ${recipients.length} client(s)${recipients.length ? ` [${recipients.join(', ')}]` : ''}`);
   }
 }
@@ -497,6 +542,7 @@ function sendReplay(ws, lastSeq = null) {
     lastSeq: latestEventSeq(),
     resumed: normalizedLastSeq != null,
   }, 'sendReplay');
+  sendTurnState(ws, 'sendReplay');
 }
 
 function sendUploadStatus(ws, uploadId, status, extra = {}) {
@@ -601,6 +647,7 @@ wss.on('connection', (ws, req) => {
             lastSeq: 0,
             resumed: false,
           }));
+          sendTurnState(ws, 'resume-empty');
           break;
         }
 
@@ -641,11 +688,11 @@ wss.on('connection', (ws, req) => {
           if (slashCommand === '/clear') {
             markExpectingSwitch();
           }
-          // Slash commands (e.g. /clear, /help, /compact) are internal CLI
+          // Slash commands are internal CLI control flow.
           // commands, not AI turns — the stop hook will never fire, so don't
-          // enter the waiting state.
+          // They should never mutate the live turn state into running.
           if (!slashCommand) {
-            broadcast({ type: 'working_started' });
+            setTurnState('running', { reason: 'chat' });
           }
           claudeProc.write(text);
           setTimeout(() => {
@@ -808,6 +855,7 @@ wss.on('connection', (ws, req) => {
             logLabel: upload.name || uploadId,
             onCleanup: () => cleanupImageUpload(uploadId),
           });
+          setTurnState('running', { reason: 'image_submit' });
           sendUploadStatus(ws, uploadId, 'submitted');
         } catch (err) {
           sendUploadStatus(ws, uploadId, 'error', { message: err.message });
@@ -907,6 +955,7 @@ function spawnClaude() {
   });
 
   log(`Claude spawned (pid ${claudeProc.pid}) — ${cols}x${rows} cmd="${claudeCmd}"`);
+  setTurnState('idle', { sessionId: currentSessionId, reason: 'claude_spawned' });
   broadcast({
     type: 'status',
     status: 'running',
@@ -932,6 +981,7 @@ function spawnClaude() {
       return;
     }
     log(`Claude exited (code=${exitCode}, signal=${signal})`);
+    setTurnState('idle', { sessionId: currentSessionId, reason: 'pty_exit' });
     broadcast({ type: 'pty_exit', exitCode, signal });
     claudeProc = null;
 
@@ -1035,6 +1085,7 @@ function extractSessionPrompt(event) {
 function attachTranscript(target, startOffset = 0) {
   transcriptPath = target.full;
   currentSessionId = path.basename(transcriptPath, '.jsonl');
+  setTurnState('idle', { sessionId: currentSessionId, reason: 'transcript_attached' });
   pendingInitialClearTranscript = target.ignoreInitialClearCommand
     ? { sessionId: currentSessionId }
     : null;
@@ -1053,8 +1104,8 @@ function attachTranscript(target, startOffset = 0) {
   }
   if (switchWatcherDelayTimer) { clearTimeout(switchWatcherDelayTimer); switchWatcherDelayTimer = null; }
 
-  // If transcript file already has content, mark as catching up so we don't
-  // broadcast working_started for historical user messages.
+  // If transcript file already has content, mark as catching up so historical
+  // transcript replay cannot mutate live turn state.
   try {
     const stat = fs.statSync(transcriptPath);
     tailCatchingUp = stat.size > transcriptOffset;
@@ -1169,11 +1220,10 @@ function startTailing() {
               pendingInitialClearTranscript &&
               pendingInitialClearTranscript.sessionId === currentSessionId
             );
-            // Only broadcast working_started for live (new) user messages,
-            // not for historical events during catch-up, and not for slash
-            // commands (which are CLI commands, not AI turns).
+            // Only live, AI-producing user messages can move the turn state
+            // into running. Historical replay and slash commands are ignored.
             if (!tailCatchingUp && !slashCommand && !isPassiveUserEvent) {
-              broadcast({ type: 'working_started' });
+              setTurnState('running', { sessionId: currentSessionId, reason: 'transcript_user_event' });
             }
             if (slashCommand === '/clear') {
               if (ignoreInitialClear) {
@@ -1401,6 +1451,7 @@ function restartClaude(newCwd) {
   eventBuffer = [];
   eventSeq = 0;
   tailCatchingUp = false;
+  setTurnState('idle', { sessionId: null, reason: 'restart_claude' });
 
   // Mark the current PTY as stale before killing it so its exit handler
   // does not shut down the whole bridge during a restart.
@@ -1500,6 +1551,7 @@ function handleImageUpload(msg) {
       mediaType: msg.mediaType,
       text: msg.text || '',
     });
+    setTurnState('running', { reason: 'legacy_image_upload' });
   } catch (err) {
     log(`Image upload error: ${err.message}`);
     try { fs.unlinkSync(tmpFile); } catch {}
