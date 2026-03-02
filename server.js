@@ -103,8 +103,9 @@ const { cwd: _parsedCwd, claudeArgs: CLAUDE_EXTRA_ARGS, blocked: _blockedArgs } 
 
 // --- Config ---
 const PORT = parseInt(process.env.PORT || '3100', 10);
-const CWD = _parsedCwd;
+let CWD = _parsedCwd;
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
+const CLAUDE_STATE_FILE = path.join(os.homedir(), '.claude.json');
 const PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
 
 // --- State ---
@@ -128,6 +129,9 @@ let tailCatchingUp = false; // true while reading historical transcript content
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
 const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
+let ttyInputForwarderAttached = false;
+let ttyInputHandler = null;
+let ttyResizeHandler = null;
 
 // --- Permission approval state ---
 let approvalSeq = 0;
@@ -161,6 +165,23 @@ function sendWs(ws, msg, context = '') {
     log(`Send ${msg.type}${context ? ` (${context})` : ''} -> ${wsLabel(ws)}${extra.length ? ` ${extra.join(' ')}` : ''}`);
   }
   return true;
+}
+
+function attachTtyForwarders() {
+  if (!isTTY || ttyInputForwarderAttached) return;
+
+  ttyInputHandler = (chunk) => {
+    if (claudeProc) claudeProc.write(chunk);
+  };
+  ttyResizeHandler = () => {
+    if (claudeProc) claudeProc.resize(process.stdout.columns, process.stdout.rows);
+  };
+
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.on('data', ttyInputHandler);
+  process.stdout.on('resize', ttyResizeHandler);
+  ttyInputForwarderAttached = true;
 }
 
 function normalizeFsPath(value) {
@@ -553,7 +574,7 @@ wss.on('connection', (ws, req) => {
     sendReplay(ws, null);
   }, LEGACY_REPLAY_DELAY_MS);
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
@@ -798,6 +819,55 @@ wss.on('connection', (ws, req) => {
         handleImageUpload(msg);
         break;
       }
+      case 'list_sessions': {
+        try {
+          const sessions = scanSessions(CWD, 20);
+          sendWs(ws, { type: 'sessions', sessions });
+        } catch (err) {
+          log(`scanSessions error: ${err.message}`);
+          sendWs(ws, { type: 'sessions', sessions: [], error: err.message });
+        }
+        break;
+      }
+      case 'list_dirs': {
+        try {
+          const browser = listDirectories(msg.cwd || CWD);
+          sendWs(ws, { type: 'dir_list', ...browser });
+        } catch (err) {
+          log(`listDirectories error: ${err.message}`);
+          sendWs(ws, {
+            type: 'dir_list',
+            cwd: path.resolve(String(msg.cwd || CWD || '')),
+            parent: null,
+            roots: getDirectoryRoots(),
+            entries: [],
+            error: err.message,
+          });
+        }
+        break;
+      }
+      case 'switch_session': {
+        if (claudeProc && msg.sessionId) {
+          log(`Switch session → /resume ${msg.sessionId}`);
+          markExpectingSwitch();
+          claudeProc.write(`/resume ${msg.sessionId}`);
+          setTimeout(() => {
+            if (claudeProc) claudeProc.write('\r');
+          }, 150);
+        }
+        break;
+      }
+      case 'change_cwd': {
+        if (msg.cwd) {
+          try {
+            const targetCwd = assertDirectoryPath(msg.cwd);
+            restartClaude(targetCwd);
+          } catch (err) {
+            sendWs(ws, { type: 'cwd_change_error', cwd: String(msg.cwd), error: err.message });
+          }
+        }
+        break;
+      }
     }
   });
 
@@ -828,7 +898,7 @@ function spawnClaude() {
   const cols = isTTY ? process.stdout.columns : 120;
   const rows = isTTY ? process.stdout.rows : 40;
 
-  claudeProc = pty.spawn(shell, args, {
+  const proc = claudeProc = pty.spawn(shell, args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -837,32 +907,30 @@ function spawnClaude() {
   });
 
   log(`Claude spawned (pid ${claudeProc.pid}) — ${cols}x${rows} cmd="${claudeCmd}"`);
-  broadcast({ type: 'status', status: 'running', pid: claudeProc.pid });
+  broadcast({
+    type: 'status',
+    status: 'running',
+    pid: proc.pid,
+    cwd: CWD,
+    sessionId: currentSessionId,
+    lastSeq: latestEventSeq(),
+  });
 
   // === PTY output → local terminal + WebSocket + mode detection ===
-  claudeProc.onData((data) => {
+  proc.onData((data) => {
     if (isTTY) process.stdout.write(data);   // show in the terminal you ran the bridge from
     broadcast({ type: 'pty_output', data });  // push to WebUI
   });
 
   // === Local terminal input → PTY ===
-  if (isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on('data', (chunk) => {
-      if (claudeProc) claudeProc.write(chunk);
-    });
-
-    // Resize PTY when local terminal resizes
-    process.stdout.on('resize', () => {
-      if (claudeProc) {
-        claudeProc.resize(process.stdout.columns, process.stdout.rows);
-      }
-    });
-  }
+  attachTtyForwarders();
 
   // === PTY exit → cleanup ===
-  claudeProc.onExit(({ exitCode, signal }) => {
+  proc.onExit(({ exitCode, signal }) => {
+    if (claudeProc !== proc) {
+      log(`Ignoring stale Claude exit (pid ${proc.pid}, code=${exitCode}, signal=${signal})`);
+      return;
+    }
     log(`Claude exited (code=${exitCode}, signal=${signal})`);
     broadcast({ type: 'pty_exit', exitCode, signal });
     claudeProc = null;
@@ -947,6 +1015,21 @@ function isNonAiUserEvent(event, content) {
   const text = flattenUserContent(content).trim();
   if (!text) return false;
   return /<local-command-(?:stdout|stderr|caveat)>/i.test(text);
+}
+
+function extractSessionPrompt(event) {
+  if (!event || event.type !== 'user') return '';
+
+  const message = event.message;
+  const content = typeof message === 'string'
+    ? message
+    : (message && typeof message === 'object' ? message.content : '');
+  const text = flattenUserContent(content).trim();
+  if (!text) return '';
+  if (isNonAiUserEvent(event, content)) return '';
+  if (extractSlashCommand(content)) return '';
+
+  return text.replace(/\s+/g, ' ').trim().substring(0, 120);
 }
 
 function attachTranscript(target, startOffset = 0) {
@@ -1154,6 +1237,111 @@ function enrichEditStartLines(event) {
   }
 }
 
+// ============================================================
+//  Session Scanner — list historical sessions from JSONL files
+// ============================================================
+function scanSessions(cwd, limit = 20) {
+  const dir = path.join(PROJECTS_DIR, getProjectSlug(cwd));
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl'));
+  } catch {
+    return [];
+  }
+
+  // Stat each file, sort by mtime desc
+  const entries = [];
+  for (const f of files) {
+    const full = path.join(dir, f);
+    try {
+      const stat = fs.statSync(full);
+      entries.push({ file: f, full, mtime: stat.mtimeMs, size: stat.size });
+    } catch { /* skip */ }
+  }
+  entries.sort((a, b) => b.mtime - a.mtime);
+  const top = entries.slice(0, limit);
+
+  const sessions = [];
+  for (const entry of top) {
+    const sessionId = path.basename(entry.file, '.jsonl');
+    const info = {
+      sessionId,
+      summary: '',
+      firstPrompt: '',
+      lastModified: Math.round(entry.mtime),
+      fileSize: entry.size,
+      cwd: cwd,
+    };
+
+    // Read first ~64KB to extract the first real user prompt and model.
+    try {
+      const fd = fs.openSync(entry.full, 'r');
+      const buf = Buffer.alloc(Math.min(entry.size, 64 * 1024));
+      fs.readSync(fd, buf, 0, buf.length, 0);
+      fs.closeSync(fd);
+      const lines = buf.toString('utf8').split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const evt = JSON.parse(line);
+          if (!info.firstPrompt) {
+            info.firstPrompt = extractSessionPrompt(evt);
+          }
+          if (!info.model && evt.model) {
+            info.model = evt.model;
+          }
+        } catch { /* skip malformed line */ }
+      }
+    } catch { /* skip unreadable file */ }
+
+    info.summary = info.firstPrompt || 'Untitled';
+    sessions.push(info);
+  }
+  return sessions;
+}
+
+function getDirectoryRoots() {
+  if (process.platform === 'win32') {
+    const roots = [];
+    for (let code = 65; code <= 90; code++) {
+      const drive = String.fromCharCode(code) + ':\\';
+      try {
+        if (fs.existsSync(drive)) roots.push(drive);
+      } catch {}
+    }
+    return roots;
+  }
+  return ['/'];
+}
+
+function assertDirectoryPath(target) {
+  const resolved = path.resolve(String(target || ''));
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new Error('Directory not found');
+  }
+  if (!stat.isDirectory()) throw new Error('Path is not a directory');
+  return resolved;
+}
+
+function listDirectories(target) {
+  const cwd = assertDirectoryPath(target);
+  const roots = getDirectoryRoots();
+  const parentDir = path.dirname(cwd);
+  const parent = normalizeFsPath(parentDir) === normalizeFsPath(cwd) ? null : parentDir;
+
+  const entries = fs.readdirSync(cwd, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => ({
+      name: entry.name,
+      path: path.join(cwd, entry.name),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+  return { cwd, parent, roots, entries };
+}
+
 function stopTailing() {
   if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
   if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
@@ -1163,6 +1351,74 @@ function stopTailing() {
   pendingSwitchTarget = null;
   pendingInitialClearTranscript = null;
   tailRemainder = Buffer.alloc(0);
+}
+
+function trustProjectCwd(cwd) {
+  const resolved = path.resolve(String(cwd || ''));
+  if (!resolved) return;
+
+  let state = {};
+  try {
+    state = JSON.parse(fs.readFileSync(CLAUDE_STATE_FILE, 'utf8'));
+  } catch {}
+
+  state.projects = state.projects && typeof state.projects === 'object' ? state.projects : {};
+  const keyVariants = process.platform === 'win32'
+    ? [resolved, resolved.replace(/\\/g, '/')]
+    : [resolved];
+
+  for (const projectKey of keyVariants) {
+    const existing = state.projects[projectKey];
+    state.projects[projectKey] = {
+      ...(existing && typeof existing === 'object' ? existing : {}),
+      hasTrustDialogAccepted: true,
+      projectOnboardingSeenCount: Number.isInteger(existing?.projectOnboardingSeenCount)
+        ? existing.projectOnboardingSeenCount
+        : 0,
+    };
+  }
+
+  fs.writeFileSync(CLAUDE_STATE_FILE, JSON.stringify(state, null, 2));
+  log(`Trusted Claude project cwd: ${resolved}`);
+}
+
+function restartClaude(newCwd) {
+  log(`Restarting Claude with new CWD: ${newCwd}`);
+  CWD = newCwd;
+  try {
+    trustProjectCwd(CWD);
+  } catch (err) {
+    log(`Failed to trust Claude project cwd "${CWD}": ${err.message}`);
+  }
+
+  // Stop transcript tailing (also clears switch/expect state)
+  stopTailing();
+
+  // Reset session state
+  currentSessionId = null;
+  transcriptPath = null;
+  transcriptOffset = 0;
+  eventBuffer = [];
+  eventSeq = 0;
+  tailCatchingUp = false;
+
+  // Mark the current PTY as stale before killing it so its exit handler
+  // does not shut down the whole bridge during a restart.
+  const procToRestart = claudeProc;
+  claudeProc = null;
+  if (procToRestart) {
+    procToRestart.kill();
+  }
+
+  // Re-setup hooks (CWD changed → project slug may change)
+  setupHooks();
+
+  // Broadcast cwd change immediately so clients drop the previous session
+  // before the replacement Claude process attaches a new transcript.
+  broadcast({ type: 'cwd_changed', cwd: CWD, sessionId: null, lastSeq: 0 });
+
+  // Respawn Claude in new directory
+  spawnClaude();
 }
 
 // ============================================================

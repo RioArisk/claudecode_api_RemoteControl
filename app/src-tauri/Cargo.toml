@@ -1,6 +1,6 @@
 [package]
 name = "claude-remote"
-version = "1.0.0"
+version = "0.1.1"
 edition = "2021"
 
 [lib]

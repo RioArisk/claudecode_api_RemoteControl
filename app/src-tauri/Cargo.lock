@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "claude-remote"
-version = "1.0.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
