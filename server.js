@@ -207,20 +207,29 @@ function maybeAttachHookSession(data, source) {
   const targetHasContent = fileLooksLikeTranscript(target.full);
 
   if (source === 'session-start') {
-    // session-start is unreliable for --resume (fires twice, one is a
-    // snapshot-only session). Only accept when:
-    // 1. No session bound yet (first attach), OR
-    // 2. Expecting a switch (/clear), OR
-    // 3. Target has conversation content and current doesn't
-    if (currentSessionId && !expectingSwitch) {
-      const currentHasContent = transcriptPath && fileLooksLikeTranscript(transcriptPath);
-      if (!targetHasContent || currentHasContent) {
-        if (currentSessionId !== target.sessionId) {
-          pendingSwitchTarget = { ...target, seenAt: Date.now(), source };
-          log(`Queued pending session-start: ${target.sessionId} (current=${currentSessionId} currentHasContent=${currentHasContent} targetHasContent=${targetHasContent})`);
+    // Check hook stdin's source field for deterministic binding
+    const hookSource = data.source; // "startup" | "resume" | "clear" | "compact"
+
+    // /clear or resume: deterministic bind — skip defensive filtering
+    if (hookSource === 'clear' || hookSource === 'resume') {
+      log(`Deterministic session-start (hookSource=${hookSource}): ${target.sessionId}`);
+      // Fall through to attachTranscript below
+    } else {
+      // session-start is unreliable for --resume (fires twice, one is a
+      // snapshot-only session). Only accept when:
+      // 1. No session bound yet (first attach), OR
+      // 2. Expecting a switch (/clear), OR
+      // 3. Target has conversation content and current doesn't
+      if (currentSessionId && !expectingSwitch) {
+        const currentHasContent = transcriptPath && fileLooksLikeTranscript(transcriptPath);
+        if (!targetHasContent || currentHasContent) {
+          if (currentSessionId !== target.sessionId) {
+            pendingSwitchTarget = { ...target, seenAt: Date.now(), source };
+            log(`Queued pending session-start: ${target.sessionId} (current=${currentSessionId} currentHasContent=${currentHasContent} targetHasContent=${targetHasContent})`);
+          }
+          log(`Ignored session-start: ${target.sessionId} (current=${currentSessionId} currentHasContent=${currentHasContent} targetHasContent=${targetHasContent})`);
+          return;
         }
-        log(`Ignored session-start: ${target.sessionId} (current=${currentSessionId} currentHasContent=${currentHasContent} targetHasContent=${targetHasContent})`);
-        return;
       }
     }
   } else if (source === 'pre-tool-use') {
@@ -356,8 +365,29 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => (body += chunk));
     req.on('end', () => {
       try {
-        maybeAttachHookSession(JSON.parse(body), 'session-start');
+        const data = JSON.parse(body);
+        log(`/hook/session-start received (source=${data.source || 'unknown'}, session_id=${data.session_id || 'none'})`);
+        maybeAttachHookSession(data, 'session-start');
       } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+    return;
+  }
+
+  // --- API: Session end hook endpoint ---
+  if (req.method === 'POST' && url === '/hook/session-end') {
+    let body = '';
+    req.on('data', chunk => (body += chunk));
+    req.on('end', () => {
+      let data = {};
+      try { data = JSON.parse(body); } catch {}
+      const reason = data.reason || 'unknown';
+      log(`/hook/session-end received (reason=${reason})`);
+      if (reason === 'clear') {
+        markExpectingSwitch();
+      }
+      broadcast({ type: 'session_end', reason });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{}');
     });
@@ -947,7 +977,7 @@ function attachTranscript(target, startOffset = 0) {
     lastSeq: 0,
   });
   startTailing();
-  startSwitchWatcher();
+  // switchWatcher is now only started as a delayed fallback from markExpectingSwitch()
 }
 
 function markExpectingSwitch() {
@@ -960,6 +990,15 @@ function markExpectingSwitch() {
   }, 15000);
   log('Expecting session switch (/clear detected)');
   if (maybeAttachPendingSwitchTarget('markExpectingSwitch')) return;
+
+  // Delay switchWatcher as fallback — give hooks 5s to bind deterministically
+  if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
+  setTimeout(() => {
+    if (expectingSwitch && !switchWatcher) {
+      log('Hook did not bind within 5s, starting switchWatcher fallback');
+      startSwitchWatcher();
+    }
+  }, 5000);
 }
 
 function startSwitchWatcher() {
@@ -1241,6 +1280,23 @@ function setupHooks() {
     existingSessionStart.push(sessionStartEntry);
   }
   settings.hooks.SessionStart = existingSessionStart;
+
+  // Merge bridge hook into SessionEnd (notify bridge when session ends, e.g. /clear)
+  const sessionEndScript = path.resolve(__dirname, 'hooks', 'bridge-session-end.js').replace(/\\/g, '/');
+  const sessionEndCmd = `node "${sessionEndScript}"`;
+  const existingSessionEnd = settings.hooks.SessionEnd || [];
+  const sessionEndBridgeIdx = existingSessionEnd.findIndex(e =>
+    e.hooks?.some(h => h.command?.includes('bridge-session-end'))
+  );
+  const sessionEndEntry = {
+    hooks: [{ type: 'command', command: sessionEndCmd, timeout: 10 }],
+  };
+  if (sessionEndBridgeIdx >= 0) {
+    existingSessionEnd[sessionEndBridgeIdx] = sessionEndEntry;
+  } else {
+    existingSessionEnd.push(sessionEndEntry);
+  }
+  settings.hooks.SessionEnd = existingSessionEnd;
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   log(`Hooks configured: ${settingsPath}`);
