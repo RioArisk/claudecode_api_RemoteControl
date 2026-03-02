@@ -118,9 +118,11 @@ const EVENT_BUFFER_MAX = 5000;
 let nextWsId = 0;
 let tailTimer = null;
 let switchWatcher = null;
+let switchWatcherDelayTimer = null;
 let expectingSwitch = false;
 let expectingSwitchTimer = null;
 let pendingSwitchTarget = null;
+let pendingInitialClearTranscript = null; // { sessionId }
 let tailRemainder = Buffer.alloc(0);
 let tailCatchingUp = false; // true while reading historical transcript content
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
@@ -197,6 +199,7 @@ function resolveHookTranscript(data) {
 function maybeAttachHookSession(data, source) {
   const target = resolveHookTranscript(data);
   if (!target) return;
+  let hookSource = null;
 
   // Already attached to this exact session — no-op
   if (currentSessionId === target.sessionId && transcriptPath &&
@@ -208,7 +211,7 @@ function maybeAttachHookSession(data, source) {
 
   if (source === 'session-start') {
     // Check hook stdin's source field for deterministic binding
-    const hookSource = data.source; // "startup" | "resume" | "clear" | "compact"
+    hookSource = data.source; // "startup" | "resume" | "clear" | "compact"
 
     // /clear or resume: deterministic bind — skip defensive filtering
     if (hookSource === 'clear' || hookSource === 'resume') {
@@ -249,7 +252,10 @@ function maybeAttachHookSession(data, source) {
   }
 
   log(`Hook session attached from ${source}: ${target.sessionId}`);
-  attachTranscript({ full: target.full }, 0);
+  attachTranscript({
+    full: target.full,
+    ignoreInitialClearCommand: source === 'session-start' && hookSource === 'clear',
+  }, 0);
 }
 
 function maybeAttachPendingSwitchTarget(reason, requireReady = true) {
@@ -946,6 +952,9 @@ function isNonAiUserEvent(event, content) {
 function attachTranscript(target, startOffset = 0) {
   transcriptPath = target.full;
   currentSessionId = path.basename(transcriptPath, '.jsonl');
+  pendingInitialClearTranscript = target.ignoreInitialClearCommand
+    ? { sessionId: currentSessionId }
+    : null;
   if (pendingSwitchTarget && pendingSwitchTarget.sessionId === currentSessionId) {
     pendingSwitchTarget = null;
   }
@@ -959,6 +968,7 @@ function attachTranscript(target, startOffset = 0) {
     expectingSwitch = false;
     if (expectingSwitchTimer) { clearTimeout(expectingSwitchTimer); expectingSwitchTimer = null; }
   }
+  if (switchWatcherDelayTimer) { clearTimeout(switchWatcherDelayTimer); switchWatcherDelayTimer = null; }
 
   // If transcript file already has content, mark as catching up so we don't
   // broadcast working_started for historical user messages.
@@ -993,7 +1003,9 @@ function markExpectingSwitch() {
 
   // Delay switchWatcher as fallback — give hooks 5s to bind deterministically
   if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
-  setTimeout(() => {
+  if (switchWatcherDelayTimer) { clearTimeout(switchWatcherDelayTimer); switchWatcherDelayTimer = null; }
+  switchWatcherDelayTimer = setTimeout(() => {
+    switchWatcherDelayTimer = null;
     if (expectingSwitch && !switchWatcher) {
       log('Hook did not bind within 5s, starting switchWatcher fallback');
       startSwitchWatcher();
@@ -1069,6 +1081,11 @@ function startTailing() {
             const content = event.message && event.message.content;
             const slashCommand = extractSlashCommand(content);
             const isPassiveUserEvent = isNonAiUserEvent(event, content);
+            const ignoreInitialClear = (
+              slashCommand === '/clear' &&
+              pendingInitialClearTranscript &&
+              pendingInitialClearTranscript.sessionId === currentSessionId
+            );
             // Only broadcast working_started for live (new) user messages,
             // not for historical events during catch-up, and not for slash
             // commands (which are CLI commands, not AI turns).
@@ -1076,8 +1093,25 @@ function startTailing() {
               broadcast({ type: 'working_started' });
             }
             if (slashCommand === '/clear') {
-              markExpectingSwitch();
+              if (ignoreInitialClear) {
+                pendingInitialClearTranscript = null;
+                log(`Ignored bootstrap /clear transcript event for session ${currentSessionId}`);
+              } else {
+                markExpectingSwitch();
+              }
+            } else if (
+              pendingInitialClearTranscript &&
+              pendingInitialClearTranscript.sessionId === currentSessionId &&
+              !isPassiveUserEvent &&
+              !event.isMeta &&
+              !event.isCompactSummary &&
+              !event.isVisibleInTranscriptOnly
+            ) {
+              pendingInitialClearTranscript = null;
             }
+          } else if (pendingInitialClearTranscript && pendingInitialClearTranscript.sessionId === currentSessionId &&
+                     event.type === 'assistant') {
+            pendingInitialClearTranscript = null;
           }
           // Enrich Edit tool_use blocks with source file start line
           enrichEditStartLines(event);
@@ -1123,9 +1157,11 @@ function enrichEditStartLines(event) {
 function stopTailing() {
   if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
   if (switchWatcher) { clearInterval(switchWatcher); switchWatcher = null; }
+  if (switchWatcherDelayTimer) { clearTimeout(switchWatcherDelayTimer); switchWatcherDelayTimer = null; }
   if (expectingSwitchTimer) { clearTimeout(expectingSwitchTimer); expectingSwitchTimer = null; }
   expectingSwitch = false;
   pendingSwitchTarget = null;
+  pendingInitialClearTranscript = null;
   tailRemainder = Buffer.alloc(0);
 }
 
