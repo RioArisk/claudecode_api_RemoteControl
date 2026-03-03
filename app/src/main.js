@@ -697,6 +697,53 @@ function getClientInstanceId() {
 
 const CLIENT_INSTANCE_ID = getClientInstanceId();
 let debugLogSeq = 0;
+const MAX_PENDING_DEBUG_LOGS = 120;
+const pendingDebugLogs = [];
+
+function wsReadyStateName(ws) {
+  if (!ws) return 'null';
+  switch (ws.readyState) {
+    case WebSocket.CONNECTING: return 'CONNECTING';
+    case WebSocket.OPEN: return 'OPEN';
+    case WebSocket.CLOSING: return 'CLOSING';
+    case WebSocket.CLOSED: return 'CLOSED';
+    default: return String(ws.readyState);
+  }
+}
+
+function queueDebugPayload(payload) {
+  pendingDebugLogs.push(payload);
+  if (pendingDebugLogs.length > MAX_PENDING_DEBUG_LOGS) pendingDebugLogs.shift();
+}
+
+function restorePendingDebugLogs(payloads) {
+  if (!payloads || !payloads.length) return;
+  pendingDebugLogs.unshift(...payloads);
+  while (pendingDebugLogs.length > MAX_PENDING_DEBUG_LOGS) pendingDebugLogs.shift();
+}
+
+function sendDebugPayload(payload) {
+  try {
+    if (typeof S !== 'undefined' && S.ws && S.ws.readyState === WebSocket.OPEN) {
+      S.ws.send(JSON.stringify({ type: 'debug_log', ...payload }));
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function flushPendingDebugLogs() {
+  if (!pendingDebugLogs.length) return;
+  if (typeof S === 'undefined' || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  const backlog = pendingDebugLogs.splice(0, pendingDebugLogs.length);
+  for (let i = 0; i < backlog.length; i += 1) {
+    const payload = backlog[i];
+    if (!sendDebugPayload(payload)) {
+      restorePendingDebugLogs(backlog.slice(i));
+      break;
+    }
+  }
+}
 
 function debugLog(event, detail = {}) {
   const payload = {
@@ -707,11 +754,7 @@ function debugLog(event, detail = {}) {
     ts: new Date().toISOString(),
   };
   console.log('[bridge-debug]', payload);
-  try {
-    if (typeof S !== 'undefined' && S.ws && S.ws.readyState === WebSocket.OPEN) {
-      S.ws.send(JSON.stringify({ type: 'debug_log', ...payload }));
-    }
-  } catch {}
+  if (!sendDebugPayload(payload)) queueDebugPayload(payload);
 }
 
 // ============================================================
@@ -721,6 +764,7 @@ const S = {
   ws: null,
   sessionId: '',
   lastSeq: 0,
+  lastMessageAt: 0,
   seenUuids: new Set(),
   messageMap: new Map(),
   toolMap: new Map(),
@@ -744,6 +788,10 @@ const S = {
   cacheSaveTimer: null,
   sessionSyncToken: 0,
   uploadWaiters: new Map(),
+  foregroundProbeSeq: 0,
+  foregroundProbeId: '',
+  foregroundProbeTimer: null,
+  lastForegroundRecoverAt: 0,
 };
 
 const dirBrowserState = {
@@ -752,6 +800,117 @@ const dirBrowserState = {
   roots: [],
   entries: [],
 };
+
+const FOREGROUND_PROBE_TIMEOUT_MS = 2000;
+const FOREGROUND_RECOVER_DEBOUNCE_MS = 1200;
+
+function clearForegroundProbe(reason = '') {
+  if (S.foregroundProbeTimer) {
+    clearTimeout(S.foregroundProbeTimer);
+    S.foregroundProbeTimer = null;
+  }
+  if (S.foregroundProbeId) {
+    debugLog('foreground_probe_clear', {
+      reason,
+      probeId: S.foregroundProbeId,
+      wsState: wsReadyStateName(S.ws),
+      waiting: S.waiting,
+      sessionId: S.sessionId || null,
+    });
+  }
+  S.foregroundProbeId = '';
+}
+
+function reconnectFromForeground(reason) {
+  debugLog('foreground_reconnect', {
+    reason,
+    wsState: wsReadyStateName(S.ws),
+    waiting: S.waiting,
+    sessionId: S.sessionId || null,
+    hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+  });
+  clearForegroundProbe(reason);
+  if (S.reconnectTimer) {
+    clearTimeout(S.reconnectTimer);
+    S.reconnectTimer = null;
+  }
+  if (S.ws && S.ws.readyState !== WebSocket.CLOSED) {
+    try { S.ws.close(); } catch {}
+    return;
+  }
+  if (!$('app').classList.contains('hidden')) connect();
+}
+
+function startForegroundProbe(trigger) {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  if (S.foregroundProbeId) return;
+
+  const probeId = `fg_${++S.foregroundProbeSeq}_${Date.now().toString(36)}`;
+  S.foregroundProbeId = probeId;
+  debugLog('foreground_probe_send', {
+    trigger,
+    probeId,
+    sessionId: S.sessionId || null,
+    lastSeq: S.lastSeq,
+    waiting: S.waiting,
+    wsState: wsReadyStateName(S.ws),
+  });
+
+  S.foregroundProbeTimer = setTimeout(() => {
+    if (S.foregroundProbeId !== probeId) return;
+    debugLog('foreground_probe_timeout', {
+      trigger,
+      probeId,
+      sessionId: S.sessionId || null,
+      lastSeq: S.lastSeq,
+      waiting: S.waiting,
+      wsState: wsReadyStateName(S.ws),
+    });
+    reconnectFromForeground('foreground_probe_timeout');
+  }, FOREGROUND_PROBE_TIMEOUT_MS);
+
+  try {
+    S.ws.send(JSON.stringify({
+      type: 'foreground_probe',
+      probeId,
+      sessionId: S.sessionId || null,
+      lastSeq: S.lastSeq,
+    }));
+  } catch {
+    reconnectFromForeground('foreground_probe_send_failed');
+  }
+}
+
+function recoverConnectionOnForeground(trigger) {
+  if (typeof document !== 'undefined' && document.hidden) return;
+  if ($('app').classList.contains('hidden')) return;
+
+  const now = Date.now();
+  if (now - S.lastForegroundRecoverAt < FOREGROUND_RECOVER_DEBOUNCE_MS) return;
+  S.lastForegroundRecoverAt = now;
+
+  debugLog('foreground_recover_check', {
+    trigger,
+    wsState: wsReadyStateName(S.ws),
+    waiting: S.waiting,
+    sessionId: S.sessionId || null,
+    lastSeq: S.lastSeq,
+    reconnectScheduled: !!S.reconnectTimer,
+    lastMessageAgoMs: S.lastMessageAt ? (now - S.lastMessageAt) : null,
+  });
+
+  if (!S.ws || S.ws.readyState === WebSocket.CLOSED) {
+    if (S.reconnectTimer) {
+      clearTimeout(S.reconnectTimer);
+      S.reconnectTimer = null;
+    }
+    connect();
+    return;
+  }
+
+  if (S.ws.readyState === WebSocket.CONNECTING || S.ws.readyState === WebSocket.CLOSING) return;
+  startForegroundProbe(trigger);
+}
 
 const $msgs = $('messages'), $chat = $('chat-area'), $input = $('input');
 const INPUT_PLACEHOLDER_DEFAULT = 'Reply...';
@@ -1412,6 +1571,9 @@ async function syncSessionState(sessionId, serverLastSeq) {
     serverLastSeq,
     waiting: S.waiting,
     lastSeq: S.lastSeq,
+    wsState: wsReadyStateName(S.ws),
+    hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+    online: typeof navigator !== 'undefined' && 'onLine' in navigator ? !!navigator.onLine : null,
   });
   S.replaying = true;
 
@@ -1451,6 +1613,9 @@ async function syncSessionState(sessionId, serverLastSeq) {
     sessionId: nextSessionId || null,
     lastSeq: nextSessionId ? S.lastSeq : 0,
     serverLastSeq: Number.isInteger(serverLastSeq) ? serverLastSeq : null,
+    wsState: wsReadyStateName(S.ws),
+    hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+    online: typeof navigator !== 'undefined' && 'onLine' in navigator ? !!navigator.onLine : null,
   });
   S.ws.send(JSON.stringify({
     type: 'resume',
@@ -2411,9 +2576,11 @@ $('btn-back').addEventListener('click', () => {
 });
 
 function resetAppState() {
+  clearForegroundProbe('reset_app_state');
   S.ws = null;
   S.sessionId = '';
   S.resumeRequestedFor = '';
+  S.lastMessageAt = 0;
   S.sessionSyncToken = 0;
   S.turnStateVersion = 0;
   S.pendingTurnState = null;
@@ -2493,6 +2660,7 @@ function send() {
 function connect() {
   let ws;
   let connectErrorShown = false;
+  const isCurrentSocket = () => S.ws === ws;
   const failConnect = (message) => {
     if (connectErrorShown) return;
     connectErrorShown = true;
@@ -2509,9 +2677,15 @@ function connect() {
   S.ws = ws;
   S.resumeRequestedFor = '';
   S.replaying = true;
-  debugLog('ws_connect_start', { serverWsUrl, sessionId: S.sessionId || null });
+  debugLog('ws_connect_start', {
+    serverWsUrl,
+    sessionId: S.sessionId || null,
+    hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+    online: typeof navigator !== 'undefined' && 'onLine' in navigator ? !!navigator.onLine : null,
+  });
 
   const connectTimeout = setTimeout(() => {
+    if (!isCurrentSocket()) return;
     if (ws.readyState !== WebSocket.OPEN) {
       ws.close();
       failConnect('Connection timed out');
@@ -2520,6 +2694,12 @@ function connect() {
 
   ws.onopen = () => {
     clearTimeout(connectTimeout);
+    if (!isCurrentSocket()) {
+      try { ws.close(); } catch {}
+      return;
+    }
+    clearForegroundProbe('ws_open');
+    S.lastMessageAt = Date.now();
     S.intentionalDisconnect = false;
     S.skipNextCloseHandling = false;
     setStatus('connected');
@@ -2535,14 +2715,20 @@ function connect() {
       sessionId: S.sessionId || null,
       waiting: S.waiting,
       replaying: S.replaying,
+      wsState: wsReadyStateName(ws),
+      hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+      online: typeof navigator !== 'undefined' && 'onLine' in navigator ? !!navigator.onLine : null,
     });
+    flushPendingDebugLogs();
     // Sync approval mode to server
     ws.send(JSON.stringify({ type: 'set_approval_mode', mode: approvalMode }));
   };
 
   ws.onmessage = async e => {
+    if (!isCurrentSocket()) return;
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
+    S.lastMessageAt = Date.now();
     if (m.type === 'status' || m.type === 'transcript_ready' || m.type === 'replay_done' ||
         m.type === 'turn_state' || m.type === 'pty_exit') {
       debugLog('ws_message', {
@@ -2551,12 +2737,38 @@ function connect() {
         lastSeq: Number.isInteger(m.lastSeq) ? m.lastSeq : null,
         waiting: S.waiting,
         replaying: S.replaying,
+        wsState: wsReadyStateName(ws),
       });
     }
     try {
       if (m.type === 'pty_output') { /* ignored — no terminal panel */ }
       else if (m.type === 'log_event') processEvent(m.event, m.seq);
       else if (m.type === 'image_upload_status') handleUploadStatus(m);
+      else if (m.type === 'foreground_probe_ack') {
+        if (!m.probeId || m.probeId !== S.foregroundProbeId) {
+          debugLog('foreground_probe_ack_ignored', {
+            probeId: m.probeId || '',
+            expectedProbeId: S.foregroundProbeId || '',
+            sessionId: 'sessionId' in m ? (m.sessionId ?? null) : null,
+            lastSeq: Number.isInteger(m.lastSeq) ? m.lastSeq : null,
+            wsState: wsReadyStateName(ws),
+          });
+          return;
+        }
+        clearForegroundProbe('ack');
+        debugLog('foreground_probe_ack', {
+          probeId: m.probeId || '',
+          sessionId: 'sessionId' in m ? (m.sessionId ?? null) : null,
+          lastSeq: Number.isInteger(m.lastSeq) ? m.lastSeq : null,
+          wsState: wsReadyStateName(ws),
+          waiting: S.waiting,
+        });
+        if (m.cwd) { S.cwd = m.cwd; updateHeaderInfo(); }
+        if ('sessionId' in m) {
+          S.resumeRequestedFor = '';
+          await syncSessionState(m.sessionId, m.lastSeq);
+        }
+      }
       else if (m.type === 'transcript_ready') {
         setStatus('connected');
         await syncSessionState(m.sessionId, m.lastSeq);
@@ -2607,8 +2819,10 @@ function connect() {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     clearTimeout(connectTimeout);
+    if (!isCurrentSocket()) return;
+    clearForegroundProbe('ws_close');
     hideHubConnectOverlay();
     renderHubCards();
     setStatus('disconnected');
@@ -2619,6 +2833,12 @@ function connect() {
       waiting: S.waiting,
       replaying: S.replaying,
       intentionalDisconnect: S.intentionalDisconnect,
+      code: event && typeof event.code === 'number' ? event.code : null,
+      reason: event && typeof event.reason === 'string' ? event.reason : '',
+      wasClean: event && typeof event.wasClean === 'boolean' ? event.wasClean : null,
+      wsState: wsReadyStateName(ws),
+      hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+      online: typeof navigator !== 'undefined' && 'onLine' in navigator ? !!navigator.onLine : null,
     });
     for (const [uploadId, waiter] of S.uploadWaiters) {
       waiter.reject(new Error('Connection lost'));
@@ -2644,7 +2864,17 @@ function connect() {
     }
   };
 
-  ws.onerror = () => {};
+  ws.onerror = () => {
+    if (!isCurrentSocket()) return;
+    debugLog('ws_error', {
+      sessionId: S.sessionId || null,
+      waiting: S.waiting,
+      replaying: S.replaying,
+      wsState: wsReadyStateName(ws),
+      hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+      online: typeof navigator !== 'undefined' && 'onLine' in navigator ? !!navigator.onLine : null,
+    });
+  };
 }
 
 function setStatus(s) {
@@ -3483,17 +3713,64 @@ $('settings-cwd-input').addEventListener('click', () => openDirPicker(S.cwd));
 // ============================================================
 //  Keyboard handling for Android virtual keyboard
 // ============================================================
+function updateKeyboardOffset() {
+  if (!window.visualViewport) return;
+  const viewportGap = Math.max(
+    0,
+    Math.round(window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop)
+  );
+  document.documentElement.style.setProperty('--keyboard-offset', `${viewportGap}px`);
+
+  if (S.isAtBottom) {
+    requestAnimationFrame(() => { $chat.scrollTop = $chat.scrollHeight; });
+  }
+}
+
 if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', () => {
-    if (S.isAtBottom) {
-      requestAnimationFrame(() => { $chat.scrollTop = $chat.scrollHeight; });
-    }
-  });
+  window.visualViewport.addEventListener('resize', updateKeyboardOffset);
+  window.visualViewport.addEventListener('scroll', updateKeyboardOffset);
+  window.addEventListener('orientationchange', updateKeyboardOffset);
+  updateKeyboardOffset();
 }
 
 // ============================================================
 //  External links — open in system browser, not in WebView
 // ============================================================
+function logLifecycleEvent(event) {
+  debugLog(event, {
+    hidden: typeof document !== 'undefined' ? !!document.hidden : null,
+    visibilityState: typeof document !== 'undefined' ? document.visibilityState : null,
+    focused: typeof document !== 'undefined' && typeof document.hasFocus === 'function' ? document.hasFocus() : null,
+    online: typeof navigator !== 'undefined' && 'onLine' in navigator ? !!navigator.onLine : null,
+    wsState: wsReadyStateName(typeof S !== 'undefined' ? S.ws : null),
+    waiting: typeof S !== 'undefined' ? S.waiting : null,
+    sessionId: typeof S !== 'undefined' ? (S.sessionId || null) : null,
+    lastSeq: typeof S !== 'undefined' ? S.lastSeq : null,
+    replaying: typeof S !== 'undefined' ? S.replaying : null,
+  });
+}
+
+window.addEventListener('focus', () => {
+  logLifecycleEvent('window_focus');
+  recoverConnectionOnForeground('window_focus');
+});
+window.addEventListener('blur', () => logLifecycleEvent('window_blur'));
+window.addEventListener('pageshow', () => {
+  logLifecycleEvent('window_pageshow');
+  recoverConnectionOnForeground('window_pageshow');
+});
+window.addEventListener('pagehide', () => logLifecycleEvent('window_pagehide'));
+window.addEventListener('online', () => {
+  logLifecycleEvent('network_online');
+  recoverConnectionOnForeground('network_online');
+});
+window.addEventListener('offline', () => logLifecycleEvent('network_offline'));
+document.addEventListener('visibilitychange', () => {
+  const becameVisible = !document.hidden;
+  logLifecycleEvent(becameVisible ? 'document_visible' : 'document_hidden');
+  if (becameVisible) recoverConnectionOnForeground('document_visible');
+});
+
 document.addEventListener('click', (e) => {
   const a = e.target.closest('a[href]');
   if (!a) return;

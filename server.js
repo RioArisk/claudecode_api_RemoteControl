@@ -668,6 +668,18 @@ wss.on('connection', (ws, req) => {
         sendReplay(ws, canResume ? msg.lastSeq : null);
         break;
       }
+      case 'foreground_probe': {
+        const probeId = typeof msg.probeId === 'string' ? msg.probeId : '';
+        sendWs(ws, {
+          type: 'foreground_probe_ack',
+          probeId,
+          sessionId: currentSessionId,
+          lastSeq: latestEventSeq(),
+          cwd: CWD,
+        }, 'foreground_probe');
+        log(`Foreground probe ack -> ${wsLabel(ws)} probeId=${probeId || 'none'} session=${currentSessionId ?? 'null'} lastSeq=${latestEventSeq()}`);
+        break;
+      }
       case 'input':
         // Raw terminal keystrokes from xterm.js in WebUI
         if (claudeProc) claudeProc.write(msg.data);

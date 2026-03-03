@@ -1,5 +1,6 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
+  --keyboard-offset: 0px;
   --bg: #f5f5f0;
   --bg-white: #ffffff;
   --bg-hover: #eeeee8;
@@ -184,6 +185,10 @@ html, body {
   background: var(--bg-white); border-radius: 16px 16px 0 0;
   padding: 24px 20px; padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   animation: slideUp .2s ease;
+  margin-bottom: var(--keyboard-offset);
+  max-height: calc(100dvh - var(--keyboard-offset) - env(safe-area-inset-top, 0px) - 12px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 @keyframes slideUp { from{transform:translateY(100%)}to{transform:translateY(0)} }
 .hub-dialog-title {
@@ -1103,6 +1108,10 @@ header {
   padding: 20px 20px calc(24px + env(safe-area-inset-bottom, 0px));
   box-shadow: 0 -4px 24px rgba(0,0,0,.12);
   animation: slideUp .2s ease;
+  margin-bottom: var(--keyboard-offset);
+  max-height: calc(100dvh - var(--keyboard-offset) - env(safe-area-inset-top, 0px) - 12px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .question-header {
   display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
@@ -1169,7 +1178,10 @@ header {
   padding: 20px 20px calc(24px + env(safe-area-inset-bottom, 0px));
   box-shadow: 0 -4px 24px rgba(0,0,0,.12);
   animation: slideUp .2s ease;
-  max-height: 85vh; overflow-y: auto;
+  margin-bottom: var(--keyboard-offset);
+  max-height: calc(100dvh - var(--keyboard-offset) - env(safe-area-inset-top, 0px) - 12px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .plan-header {
   display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
