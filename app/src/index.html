@@ -9,39 +9,67 @@
 </head>
 <body>
 
-<!-- ===== Connect Screen ===== -->
+<!-- ===== Hub Screen ===== -->
 <div id="connect-screen">
-  <div class="connect-card">
-    <div class="connect-logo">
-      <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+  <div class="hub-header">
+    <div class="hub-header-left">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="hub-logo-icon">
         <circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/>
       </svg>
+      <span class="hub-header-title">Claude Remote</span>
     </div>
-    <h1>Claude Remote</h1>
-    <p class="connect-desc">Connect to your Claude Bridge server</p>
+    <button class="hub-add-btn" id="hub-add-btn" title="Add server">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
+  <div class="hub-body" id="hub-body">
+    <div class="hub-empty" id="hub-empty">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+      <p>No servers yet</p>
+      <p class="hub-empty-sub">Tap + to add a server</p>
+    </div>
+    <div class="hub-section" id="hub-section-online" style="display:none">
+      <div class="hub-section-header">Online</div>
+      <div class="hub-card-list" id="hub-list-online"></div>
+    </div>
+    <div class="hub-section" id="hub-section-offline" style="display:none">
+      <div class="hub-section-header">Offline</div>
+      <div class="hub-card-list" id="hub-list-offline"></div>
+    </div>
+  </div>
 
-    <div class="connect-form">
-      <label class="connect-label">Server Address</label>
-      <div class="connect-input-row">
-        <input id="server-addr" type="text" placeholder="192.168.1.100:3100 or wss://example.com"
-               inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <div id="hub-connect-overlay">
+    <div class="hub-connect-card">
+      <div class="hub-connect-spinner"></div>
+      <div class="hub-connect-title">Connecting...</div>
+      <div class="hub-connect-sub" id="hub-connect-sub">Preparing server session</div>
+    </div>
+  </div>
+
+  <!-- Add/Edit Server Dialog -->
+  <div id="hub-add-overlay">
+    <div id="hub-add-dialog">
+      <div class="hub-dialog-title" id="hub-dialog-title">Add Server</div>
+      <label class="hub-dialog-label">Server Address</label>
+      <input id="hub-dialog-addr" type="text" placeholder="192.168.1.100:3100 or wss://example.com"
+             inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="hub-dialog-label">Alias (optional)</label>
+      <input id="hub-dialog-alias" type="text" placeholder="e.g. Home Server"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="hub-dialog-error" id="hub-dialog-error"></div>
+      <div class="hub-dialog-actions">
+        <button class="hub-dialog-btn cancel" id="hub-dialog-cancel">Cancel</button>
+        <button class="hub-dialog-btn delete" id="hub-dialog-delete" style="display:none">Delete</button>
+        <button class="hub-dialog-btn save" id="hub-dialog-save">Save</button>
       </div>
-
-      <div class="connect-history" id="connect-history"></div>
-
-      <button id="btn-connect" class="connect-btn">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        <span>Connect</span>
-      </button>
-
-      <div class="connect-error" id="connect-error"></div>
     </div>
   </div>
 </div>
 
+<div id="toast-container"></div>
+
 <!-- ===== Main App ===== -->
 <div id="app" class="hidden">
-  <div id="toast-container"></div>
   <div id="conn-banner"><span class="banner-dot"></span><span id="conn-text">Disconnected</span></div>
 
   <header>

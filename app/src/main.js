@@ -10,6 +10,11 @@ const $ = id => document.getElementById(id);
 // ============================================================
 const STORAGE_KEY = 'claude_remote_servers';
 const LAST_KEY = 'claude_remote_last';
+const SERVERS_MAX = 20;
+const HUB_PROBE_INTERVAL_MS = 15000;
+const HUB_PROBE_TIMEOUT_MS = 3000;
+const HUB_PROBE_FAST_RETRY_MS = 1200;
+const HUB_PROBE_FAILS_TO_OFFLINE = 2;
 const CHAT_CACHE_DB = 'claude_remote_chat_cache';
 const CHAT_CACHE_STORE = 'sessions';
 const CHAT_CACHE_MAX_SESSIONS = 8;
@@ -19,20 +24,123 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const IMAGE_CHUNK_BYTES = 96 * 1024;
 let chatCacheDbPromise = null;
 
-function getSavedServers() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; }
+// ---- Hub state ----
+let hubStatus = new Map();      // serverId -> { status, latencyMs, ... }
+let hubProbeTimer = null;
+let hubEditingServerId = null;
+let hubRetryTimers = new Map();
+let hubConnectingServerId = null;
+
+function generateServerId() {
+  return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 }
+
+function normalizeServerEntry(raw) {
+  const base = (raw && typeof raw === 'object') ? raw : { addr: raw };
+  const parsed = parseServerAddress(String(base.addr || ''));
+  return {
+    id: typeof base.id === 'string' && base.id ? base.id : generateServerId(),
+    addr: parsed.ok ? parsed.displayAddr : String(base.addr || '').trim(),
+    wsUrl: parsed.ok ? parsed.wsUrl : String(base.wsUrl || ''),
+    cacheAddr: parsed.ok ? parsed.cacheAddr : String(base.cacheAddr || ''),
+    alias: typeof base.alias === 'string' ? base.alias.trim() : '',
+    addedAt: Number.isFinite(base.addedAt) ? base.addedAt : Date.now(),
+    lastConnectedAt: Number.isFinite(base.lastConnectedAt) ? base.lastConnectedAt : 0,
+  };
+}
+
+function getServerDedupKey(server) {
+  if (server.wsUrl) return `ws:${server.wsUrl}`;
+  const parsed = parseServerAddress(server.addr || '');
+  if (parsed.ok) return `ws:${parsed.wsUrl}`;
+  return `addr:${String(server.addr || '').trim().toLowerCase()}`;
+}
+
+function getServerDisplayName(server) {
+  return (server.alias || server.addr || '').trim();
+}
+
+function normalizeServerList(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const normalized = [];
+  list.forEach(item => {
+    const entry = normalizeServerEntry(item);
+    const key = getServerDedupKey(entry);
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push(entry);
+  });
+  return normalized.slice(0, SERVERS_MAX);
+}
+
+function getSavedServers() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    return normalizeServerList(raw);
+  } catch { return []; }
+}
+
+function migrateServerList() {
+  const rawText = localStorage.getItem(STORAGE_KEY);
+  if (!rawText) return;
+  try {
+    const raw = JSON.parse(rawText);
+    const normalized = normalizeServerList(raw);
+    if (JSON.stringify(raw) !== JSON.stringify(normalized)) saveServerList(normalized);
+  } catch {
+    saveServerList([]);
+  }
+}
+
+function saveServerList(list) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeServerList(list)));
+}
+
+function findDuplicateServer(list, wsUrl, excludeId = null) {
+  return list.find(server => server.id !== excludeId && getServerDedupKey(server) === `ws:${wsUrl}`);
+}
+
+function addServer(addr, alias) {
+  const parsed = parseServerAddress(addr);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  let list = getSavedServers();
+  if (findDuplicateServer(list, parsed.wsUrl)) {
+    return { ok: false, error: 'Server already exists' };
+  }
+  const entry = {
+    id: generateServerId(),
+    addr: parsed.displayAddr,
+    wsUrl: parsed.wsUrl,
+    cacheAddr: parsed.cacheAddr,
+    alias: (alias || '').trim(),
+    addedAt: Date.now(),
+    lastConnectedAt: 0,
+  };
+  list.unshift(entry);
+  saveServerList(list);
+  return { ok: true, entry };
+}
+
 function saveServer(addr) {
   let list = getSavedServers();
-  list = list.filter(a => a !== addr);
-  list.unshift(addr);
-  if (list.length > 5) list = list.slice(0, 5);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  const idx = list.findIndex(s => s.addr === addr || s.wsUrl === serverWsUrl);
+  if (idx >= 0) {
+    list[idx].lastConnectedAt = Date.now();
+  }
+  saveServerList(list);
   localStorage.setItem(LAST_KEY, addr);
 }
-function removeServer(addr) {
-  let list = getSavedServers().filter(a => a !== addr);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+
+function removeServer(id) {
+  let list = getSavedServers().filter(s => s.id !== id);
+  saveServerList(list);
+}
+
+function updateServerAlias(id, alias) {
+  let list = getSavedServers();
+  const s = list.find(s => s.id === id);
+  if (s) { s.alias = (alias || '').trim(); saveServerList(list); }
 }
 
 function openChatCacheDb() {
@@ -150,80 +258,425 @@ async function pruneChatCache() {
   await Promise.all(removals.map(cacheKey => chatCacheDelete(cacheKey).catch(() => {})));
 }
 
-function renderHistory() {
-  const container = $('connect-history');
-  const list = getSavedServers();
-  container.innerHTML = list.map(addr => {
-    const safe = esc(addr);
-    return `<span class="history-chip" data-addr="${safe}">
-      <span>${safe}</span>
-      <button class="remove-chip" data-remove="${safe}">&times;</button>
-    </span>`;
-  }).join('');
+// ---- Hub rendering & probes ----
+function timeAgo(ts) {
+  if (!ts) return 'Never';
+  const diff = Date.now() - ts;
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + 'm ago';
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return hr + 'h ago';
+  const day = Math.floor(hr / 24);
+  return day + 'd ago';
+}
 
-  container.querySelectorAll('.history-chip').forEach(el => {
-    el.addEventListener('click', (e) => {
-      if (e.target.classList.contains('remove-chip')) {
+function createHubProbeInfo() {
+  return {
+    status: 'probing',
+    latencyMs: null,
+    lastProbeAt: 0,
+    lastSuccessAt: 0,
+    consecutiveFailures: 0,
+    probeToken: 0,
+  };
+}
+
+function getHubProbeInfo(serverId) {
+  if (!hubStatus.has(serverId)) hubStatus.set(serverId, createHubProbeInfo());
+  return hubStatus.get(serverId);
+}
+
+function resetHubProbeInfo(serverId) {
+  const previous = getHubProbeInfo(serverId);
+  const next = createHubProbeInfo();
+  next.probeToken = previous.probeToken;
+  hubStatus.set(serverId, next);
+  return next;
+}
+
+function syncHubProbeState(servers) {
+  const ids = new Set(servers.map(server => server.id));
+  Array.from(hubStatus.keys()).forEach(id => {
+    if (ids.has(id)) return;
+    hubStatus.delete(id);
+    if (hubRetryTimers.has(id)) {
+      clearTimeout(hubRetryTimers.get(id));
+      hubRetryTimers.delete(id);
+    }
+  });
+}
+
+function hubPingTone(latencyMs) {
+  if (!Number.isFinite(latencyMs)) return 'offline';
+  if (latencyMs <= 120) return 'excellent';
+  if (latencyMs <= 300) return 'good';
+  if (latencyMs <= 800) return 'warn';
+  return 'bad';
+}
+
+function renderHubPing(info) {
+  const classes = ['hub-card-ping'];
+  let label = '--';
+
+  if (info.status === 'probing') {
+    classes.push('probing');
+    label = '...';
+  } else if (info.status === 'offline') {
+    classes.push('offline');
+  } else if (Number.isFinite(info.latencyMs)) {
+    classes.push(hubPingTone(info.latencyMs));
+    label = `${Math.round(info.latencyMs)}ms`;
+    if (info.status === 'unstable') {
+      classes.push('stale');
+      label = `~${label}`;
+    }
+  }
+
+  return `<span class="${classes.join(' ')}">${label}</span>`;
+}
+
+function renderHubCards() {
+  const servers = getSavedServers();
+  syncHubProbeState(servers);
+  const empty = $('hub-empty');
+  const secOnline = $('hub-section-online');
+  const secOffline = $('hub-section-offline');
+  const listOnline = $('hub-list-online');
+  const listOffline = $('hub-list-offline');
+
+  if (servers.length === 0) {
+    empty.style.display = '';
+    secOnline.style.display = 'none';
+    secOffline.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+
+  const onlineCards = [];
+  const offlineCards = [];
+
+  servers.forEach(s => {
+    const probe = getHubProbeInfo(s.id);
+    const status = probe.status || 'probing';
+    const displayName = getServerDisplayName(s);
+    const showAddr = s.alias ? s.addr : '';
+    const isConnecting = hubConnectingServerId === s.id;
+    const card = `<div class="hub-card" data-server-id="${esc(s.id)}">
+      <div class="hub-card-status ${status}"></div>
+      <div class="hub-card-info">
+        <div class="hub-card-name">${esc(displayName)}</div>
+        ${showAddr ? `<div class="hub-card-addr">${esc(showAddr)}</div>` : ''}
+      </div>
+      <div class="hub-card-side">
+        ${isConnecting ? '<span class="hub-card-ping probing">...</span>' : renderHubPing(probe)}
+        <span class="hub-card-time">${esc(timeAgo(s.lastConnectedAt))}</span>
+      </div>
+      <button class="hub-card-edit" data-edit-id="${esc(s.id)}" title="Edit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+      </button>
+    </div>`;
+
+    if (status === 'online' || status === 'unstable') onlineCards.push(card);
+    else offlineCards.push(card);
+  });
+
+  secOnline.style.display = onlineCards.length ? '' : 'none';
+  secOffline.style.display = offlineCards.length ? '' : 'none';
+  listOnline.innerHTML = onlineCards.join('');
+  listOffline.innerHTML = offlineCards.join('');
+
+  // Bind card clicks
+  document.querySelectorAll('.hub-card').forEach(card => {
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.hub-card-edit')) {
         e.stopPropagation();
-        removeServer(e.target.dataset.remove);
-        renderHistory();
+        openEditServerDialog(e.target.closest('.hub-card-edit').dataset.editId);
         return;
       }
-      $('server-addr').value = el.dataset.addr;
+      connectToServer(card.dataset.serverId);
     });
   });
 }
 
-// Restore last address
-const lastAddr = localStorage.getItem(LAST_KEY);
-if (lastAddr) $('server-addr').value = lastAddr;
-renderHistory();
+function showHubConnectOverlay(server) {
+  hubConnectingServerId = server && server.id ? server.id : null;
+  const sub = $('hub-connect-sub');
+  sub.textContent = server ? `Connecting to ${getServerDisplayName(server)}` : 'Preparing server session';
+  $('hub-connect-overlay').classList.add('visible');
+}
+
+function hideHubConnectOverlay() {
+  hubConnectingServerId = null;
+  $('hub-connect-overlay').classList.remove('visible');
+}
+
+function clearHubRetry(serverId) {
+  if (!hubRetryTimers.has(serverId)) return;
+  clearTimeout(hubRetryTimers.get(serverId));
+  hubRetryTimers.delete(serverId);
+}
+
+function scheduleHubRetry(serverId) {
+  if (hubRetryTimers.has(serverId)) return;
+  const timer = setTimeout(() => {
+    hubRetryTimers.delete(serverId);
+    if ($('connect-screen').classList.contains('hidden')) return;
+    const server = getSavedServers().find(item => item.id === serverId);
+    if (!server) return;
+    runHubProbes([server]);
+  }, HUB_PROBE_FAST_RETRY_MS);
+  hubRetryTimers.set(serverId, timer);
+}
+
+function probeServer(server) {
+  return new Promise(resolve => {
+    if (!server.wsUrl) { resolve({ ok: false, latencyMs: null }); return; }
+    let done = false;
+    const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      const endedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      resolve({
+        ok,
+        latencyMs: ok ? Math.max(1, Math.round(endedAt - startedAt)) : null,
+      });
+    };
+    try {
+      const ws = new WebSocket(server.wsUrl);
+      const timer = setTimeout(() => { try { ws.close(); } catch {} finish(false); }, HUB_PROBE_TIMEOUT_MS);
+      ws.onopen = () => { clearTimeout(timer); try { ws.close(); } catch {} finish(true); };
+      ws.onerror = () => { clearTimeout(timer); finish(false); };
+      ws.onclose = () => { clearTimeout(timer); if (!done) finish(false); };
+    } catch { finish(false); }
+  });
+}
+
+function applyHubProbeResult(server, result) {
+  const info = getHubProbeInfo(server.id);
+  info.lastProbeAt = Date.now();
+
+  if (result.ok) {
+    clearHubRetry(server.id);
+    info.status = 'online';
+    info.latencyMs = result.latencyMs;
+    info.lastSuccessAt = info.lastProbeAt;
+    info.consecutiveFailures = 0;
+    return;
+  }
+
+  info.consecutiveFailures += 1;
+  if (info.lastSuccessAt && info.consecutiveFailures < HUB_PROBE_FAILS_TO_OFFLINE) {
+    info.status = 'unstable';
+    scheduleHubRetry(server.id);
+    return;
+  }
+
+  clearHubRetry(server.id);
+  info.status = 'offline';
+  info.latencyMs = null;
+}
+
+async function runHubProbes(servers, { markUnknown = false } = {}) {
+  if (!servers.length) return;
+  const results = await Promise.all(servers.map(server => {
+    const info = getHubProbeInfo(server.id);
+    const token = ++info.probeToken;
+    if (markUnknown && !info.lastProbeAt) info.status = 'probing';
+    return probeServer(server).then(result => ({ server, result, token }));
+  }));
+  results.forEach(({ server, result, token }) => {
+    const current = hubStatus.get(server.id);
+    if (!current || current.probeToken !== token) return;
+    applyHubProbeResult(server, result);
+  });
+  renderHubCards();
+}
+
+async function probeAllServers() {
+  const servers = getSavedServers();
+  syncHubProbeState(servers);
+  if (servers.length === 0) {
+    renderHubCards();
+    return;
+  }
+  renderHubCards();
+  await runHubProbes(servers, { markUnknown: true });
+}
+
+function startHubProbes() {
+  stopHubProbes();
+  probeAllServers();
+  hubProbeTimer = setInterval(() => probeAllServers(), HUB_PROBE_INTERVAL_MS);
+}
+
+function stopHubProbes() {
+  if (hubProbeTimer) { clearInterval(hubProbeTimer); hubProbeTimer = null; }
+  Array.from(hubRetryTimers.values()).forEach(timer => clearTimeout(timer));
+  hubRetryTimers.clear();
+}
+
+function connectToServer(serverId) {
+  if (hubConnectingServerId) return;
+  const servers = getSavedServers();
+  const s = servers.find(x => x.id === serverId);
+  if (!s) { showToast('Server not found'); return; }
+  if (!s.wsUrl) {
+    // Re-parse in case format was invalid at migration time
+    const parsed = parseServerAddress(s.addr);
+    if (!parsed.ok) { showToast('Invalid server address'); return; }
+    s.wsUrl = parsed.wsUrl;
+    s.cacheAddr = parsed.cacheAddr;
+    saveServerList(servers);
+  }
+  serverAddr = s.addr;
+  serverWsUrl = s.wsUrl;
+  serverCacheAddr = s.cacheAddr;
+  showHubConnectOverlay(s);
+  renderHubCards();
+  connect();
+}
+
+// ---- Hub add/edit dialog ----
+function openAddServerDialog() {
+  hubEditingServerId = null;
+  $('hub-dialog-title').textContent = 'Add Server';
+  $('hub-dialog-addr').value = '';
+  $('hub-dialog-alias').value = '';
+  $('hub-dialog-error').textContent = '';
+  $('hub-dialog-delete').style.display = 'none';
+  $('hub-add-overlay').classList.add('visible');
+  $('hub-dialog-addr').focus();
+}
+
+function openEditServerDialog(id) {
+  const servers = getSavedServers();
+  const s = servers.find(x => x.id === id);
+  if (!s) return;
+  hubEditingServerId = id;
+  $('hub-dialog-title').textContent = 'Edit Server';
+  $('hub-dialog-addr').value = s.addr;
+  $('hub-dialog-alias').value = s.alias || '';
+  $('hub-dialog-error').textContent = '';
+  $('hub-dialog-delete').style.display = '';
+  $('hub-add-overlay').classList.add('visible');
+  $('hub-dialog-addr').focus();
+}
+
+function closeServerDialog() {
+  $('hub-add-overlay').classList.remove('visible');
+  hubEditingServerId = null;
+}
+
+function saveServerDialog() {
+  const addr = $('hub-dialog-addr').value.trim();
+  const alias = $('hub-dialog-alias').value.trim();
+  if (!addr) { $('hub-dialog-error').textContent = 'Please enter a server address'; return; }
+  const parsed = parseServerAddress(addr);
+  if (!parsed.ok) { $('hub-dialog-error').textContent = parsed.error; return; }
+
+  if (hubEditingServerId) {
+    // Update existing
+    let list = getSavedServers();
+    const s = list.find(x => x.id === hubEditingServerId);
+    if (s) {
+      const duplicate = findDuplicateServer(list, parsed.wsUrl, hubEditingServerId);
+      if (duplicate) {
+        $('hub-dialog-error').textContent = 'Server already exists';
+        return;
+      }
+      s.addr = parsed.displayAddr;
+      s.wsUrl = parsed.wsUrl;
+      s.cacheAddr = parsed.cacheAddr;
+      s.alias = alias;
+      saveServerList(list);
+      resetHubProbeInfo(s.id);
+      clearHubRetry(s.id);
+      runHubProbes([s], { markUnknown: true });
+    }
+  } else {
+    // Add new
+    const result = addServer(addr, alias);
+    if (!result.ok) { $('hub-dialog-error').textContent = result.error || 'Invalid address'; return; }
+    hubStatus.set(result.entry.id, createHubProbeInfo());
+    runHubProbes([result.entry], { markUnknown: true });
+  }
+  closeServerDialog();
+  renderHubCards();
+}
+
+function deleteServerFromDialog() {
+  if (!hubEditingServerId) return;
+  const id = hubEditingServerId;
+  // Use the existing confirm overlay
+  $('confirm-text').textContent = 'Delete this server?';
+  $('confirm-overlay').classList.add('visible');
+  const onOk = () => {
+    removeServer(id);
+    hubStatus.delete(id);
+    clearHubRetry(id);
+    closeServerDialog();
+    renderHubCards();
+    cleanup();
+  };
+  const onCancel = () => { cleanup(); };
+  function cleanup() {
+    $('confirm-ok').removeEventListener('click', onOk);
+    $('confirm-cancel').removeEventListener('click', onCancel);
+    $('confirm-overlay').classList.remove('visible');
+  }
+  $('confirm-ok').addEventListener('click', onOk);
+  $('confirm-cancel').addEventListener('click', onCancel);
+}
+
+// ---- Migrate on load ----
+migrateServerList();
+
+// Restore last address is no longer needed (Hub handles it)
+// But we still render the hub cards and start probing
+renderHubCards();
+startHubProbes();
 
 let serverAddr = '';
 let serverWsUrl = '';
 let serverCacheAddr = '';
 let pendingImage = null; // { file, mediaType, name, previewUrl, uploadId, status, progress, ... }
 
-$('btn-connect').addEventListener('click', tryConnect);
-$('server-addr').addEventListener('keydown', e => {
-  if (e.key === 'Enter') tryConnect();
+// Hub button bindings
+$('hub-add-btn').addEventListener('click', openAddServerDialog);
+$('hub-dialog-cancel').addEventListener('click', closeServerDialog);
+$('hub-dialog-save').addEventListener('click', saveServerDialog);
+$('hub-dialog-delete').addEventListener('click', deleteServerFromDialog);
+$('hub-add-overlay').addEventListener('click', (e) => {
+  if (e.target === $('hub-add-overlay')) closeServerDialog();
+});
+$('hub-dialog-addr').addEventListener('keydown', e => {
+  if (e.key === 'Enter') saveServerDialog();
 });
 
 function tryConnect() {
-  const input = $('server-addr').value.trim();
-  if (!input) { $('connect-error').textContent = 'Please enter a server address'; return; }
-
-  const parsed = parseServerAddress(input);
-  if (!parsed.ok) {
-    $('connect-error').textContent = parsed.error;
-    return;
-  }
-
-  serverAddr = parsed.displayAddr;
-  serverWsUrl = parsed.wsUrl;
-  serverCacheAddr = parsed.cacheAddr;
-  $('server-addr').value = parsed.displayAddr;
-
-  $('connect-error').textContent = '';
-  $('btn-connect').classList.add('connecting');
-  $('btn-connect').querySelector('span').textContent = 'Connecting...';
-
+  // Called only for programmatic connections; Hub cards use connectToServer()
+  if (!serverWsUrl) return;
   connect();
 }
 
 function showConnectScreen() {
+  hideHubConnectOverlay();
   $('connect-screen').classList.remove('hidden');
   $('app').classList.add('hidden');
-  $('btn-connect').classList.remove('connecting');
-  $('btn-connect').querySelector('span').textContent = 'Connect';
-  renderHistory();
+  hubStatus.clear();
+  renderHubCards();
+  startHubProbes();
 }
 
 function showApp() {
+  hideHubConnectOverlay();
+  stopHubProbes();
   $('connect-screen').classList.add('hidden');
   $('app').classList.remove('hidden');
   saveServer(serverAddr);
-  renderHistory();
 }
 
 const CLIENT_INSTANCE_KEY = 'claude_remote_client_instance_id';
@@ -286,6 +739,7 @@ const S = {
   pendingPlanContent: '',
   reconnectTimer: null,
   intentionalDisconnect: false,
+  skipNextCloseHandling: false,
   resumeRequestedFor: '',
   cacheSaveTimer: null,
   sessionSyncToken: 0,
@@ -1941,9 +2395,15 @@ updateSendBtn();
 // Back button — disconnect and return to connect screen
 $('btn-back').addEventListener('click', () => {
   (async () => {
-    S.intentionalDisconnect = true;
+    const hadWs = !!S.ws;
+    S.intentionalDisconnect = hadWs;
+    S.skipNextCloseHandling = hadWs;
     await flushSessionCacheSave().catch(() => {});
     if (S.ws) S.ws.close();
+    else {
+      S.intentionalDisconnect = false;
+      S.skipNextCloseHandling = false;
+    }
     if (S.reconnectTimer) { clearTimeout(S.reconnectTimer); S.reconnectTimer = null; }
     resetAppState();
     showConnectScreen();
@@ -2032,12 +2492,18 @@ function send() {
 // ============================================================
 function connect() {
   let ws;
+  let connectErrorShown = false;
+  const failConnect = (message) => {
+    if (connectErrorShown) return;
+    connectErrorShown = true;
+    hideHubConnectOverlay();
+    renderHubCards();
+    showToast(message);
+  };
   try {
     ws = new WebSocket(serverWsUrl);
   } catch (e) {
-    $('connect-error').textContent = 'Invalid address';
-    $('btn-connect').classList.remove('connecting');
-    $('btn-connect').querySelector('span').textContent = 'Connect';
+    failConnect('Invalid server address');
     return;
   }
   S.ws = ws;
@@ -2048,14 +2514,14 @@ function connect() {
   const connectTimeout = setTimeout(() => {
     if (ws.readyState !== WebSocket.OPEN) {
       ws.close();
-      $('connect-error').textContent = 'Connection timed out';
-      $('btn-connect').classList.remove('connecting');
-      $('btn-connect').querySelector('span').textContent = 'Connect';
+      failConnect('Connection timed out');
     }
   }, 8000);
 
   ws.onopen = () => {
     clearTimeout(connectTimeout);
+    S.intentionalDisconnect = false;
+    S.skipNextCloseHandling = false;
     setStatus('connected');
     setConnBanner(false);
     showApp();
@@ -2143,6 +2609,8 @@ function connect() {
 
   ws.onclose = () => {
     clearTimeout(connectTimeout);
+    hideHubConnectOverlay();
+    renderHubCards();
     setStatus('disconnected');
     S.resumeRequestedFor = '';
     S.pendingTurnState = null;
@@ -2161,15 +2629,18 @@ function connect() {
       updateImagePreviewUi();
       if (S.waiting) setWaiting(false, 'ws_close_pending_image');
     }
+    if (S.skipNextCloseHandling) {
+      S.skipNextCloseHandling = false;
+      S.intentionalDisconnect = false;
+      return;
+    }
     if (S.intentionalDisconnect) return;
 
     if (!$('app').classList.contains('hidden')) {
       setConnBanner(true, true);
       S.reconnectTimer = setTimeout(connect, 2000);
     } else {
-      $('connect-error').textContent = 'Connection failed \u2014 check the address and server';
-      $('btn-connect').classList.remove('connecting');
-      $('btn-connect').querySelector('span').textContent = 'Connect';
+      failConnect('Connection failed - check the address and server');
     }
   };
 
