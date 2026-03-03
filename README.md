@@ -59,9 +59,56 @@ claude-remote /path/to/project --resume abc123
 PORT=8080 claude-remote
 ```
 
-### 3. App 连接
+### 3. 安全认证
 
-安装 Android App 后，在设置页输入服务器地址连接。根据你的网络环境，有以下三种方式：
+`claude-remote` 内置 Token 鉴权机制，防止未授权的客户端控制你的 Claude Code。
+
+#### 工作原理
+
+1. **首次启动时自动生成 Token** —— 桥接器启动后会自动生成一个随机 Token，持久化到 `~/.claude-remote-token` 文件，并在启动 banner 中显示
+2. **客户端必须提供 Token** —— App 在添加/编辑服务器时填入 Token，连接时通过 `hello` 握手消息发送给服务器
+3. **服务器验证 Token** —— 使用 `crypto.timingSafeEqual` 安全比对，防止时序攻击。验证通过后才发送会话数据
+4. **认证超时** —— 连接后 5 秒内未完成认证将被自动断开（close code 4002）
+5. **认证失败** —— Token 不匹配时连接立即关闭（close code 4001），App 会弹出编辑对话框提示修正
+
+#### Token 来源优先级
+
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| 1 | `--token <value>` | CLI 参数，最高优先级 |
+| 2 | `CLAUDE_REMOTE_TOKEN` 环境变量 | 适合 CI/脚本场景 |
+| 3 | `~/.claude-remote-token` 文件 | 自动生成并持久化，首次启动时创建 |
+
+```bash
+# 使用自定义 Token
+claude-remote --token my-secret-token
+
+# 通过环境变量
+CLAUDE_REMOTE_TOKEN=my-secret-token claude-remote
+
+# 默认行为：自动生成并保存到 ~/.claude-remote-token
+claude-remote
+```
+
+#### 禁用认证
+
+> ⚠️ 仅在安全网络环境下使用，如本地开发或 VPN 内网。
+
+```bash
+# CLI 参数
+claude-remote --no-auth
+
+# 环境变量
+NO_AUTH=1 claude-remote
+```
+
+#### App 端配置
+
+在连接中心添加或编辑服务器时，填入 Token 字段即可。Token 输入框支持密码显示/隐藏切换。认证失败时 App 会自动弹出编辑对话框，方便修正 Token。
+
+### 4. App 连接
+
+安装 Android App 后，在连接中心添加服务器地址连接。根据你的网络环境，有以下三种方式：
 
 #### 方式一：局域网直连
 
@@ -107,7 +154,7 @@ wss://xxx.trycloudflare.com
 
 > 适合在外网或移动网络下远程控制，支持 HTTPS/WSS 加密。
 
-### 4. 编译 Android App
+### 5. 编译 Android App
 
 ```bash
 cd app
@@ -143,6 +190,7 @@ npx tauri android dev
 | 工具调用追踪 | 折叠式 step group，shimmer 加载动效 |
 | 权限队列 | 批量审批，计数器显示剩余数量 |
 | 模式切换 | 四种模式一键切换，彩色状态标识 |
+| Token 鉴权 | 自动生成 Token，timingSafeEqual 安全比对，防止未授权访问 |
 | 对话压缩 | /compact 带 spinner 遮罩，压缩完自动恢复 |
 | 斜杠命令菜单 | 输入 `/` 弹出命令面板 |
 | 模型切换 | 底部面板选择，toast 即时反馈 |

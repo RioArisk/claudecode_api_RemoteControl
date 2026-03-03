@@ -199,14 +199,26 @@ html, body {
   color: var(--text-secondary); margin-bottom: 6px; margin-top: 12px;
 }
 .hub-dialog-label:first-of-type { margin-top: 0; }
-#hub-dialog-addr, #hub-dialog-alias {
+#hub-dialog-addr, #hub-dialog-alias, #hub-dialog-token {
   width: 100%; height: 46px; padding: 0 14px;
   border: 1.5px solid var(--border); border-radius: var(--radius-sm);
   font-size: 15px; color: var(--text); background: var(--bg);
   outline: none; transition: border-color .15s;
 }
 #hub-dialog-addr { font-family: var(--mono); }
-#hub-dialog-addr:focus, #hub-dialog-alias:focus { border-color: var(--accent); }
+#hub-dialog-addr:focus, #hub-dialog-alias:focus, #hub-dialog-token:focus { border-color: var(--accent); }
+.hub-dialog-token-row {
+  display: flex; gap: 8px; align-items: center;
+}
+.hub-dialog-token-row #hub-dialog-token { flex: 1; font-family: var(--mono); }
+.hub-dialog-token-toggle {
+  width: 46px; height: 46px; border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--bg);
+  color: var(--text-secondary); cursor: pointer; display: flex;
+  align-items: center; justify-content: center; flex-shrink: 0;
+  transition: border-color .15s, color .15s;
+}
+.hub-dialog-token-toggle:hover { border-color: var(--accent); color: var(--text); }
 .hub-dialog-error {
   margin-top: 8px; font-size: 13px; color: var(--error); min-height: 18px;
 }

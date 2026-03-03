@@ -56,6 +56,14 @@
       <label class="hub-dialog-label">Alias (optional)</label>
       <input id="hub-dialog-alias" type="text" placeholder="e.g. Home Server"
              autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="hub-dialog-label">Token (optional)</label>
+      <div class="hub-dialog-token-row">
+        <input id="hub-dialog-token" type="password" placeholder="Auth token"
+               autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button type="button" class="hub-dialog-token-toggle" id="hub-dialog-token-toggle" title="Show/hide token">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
       <div class="hub-dialog-error" id="hub-dialog-error"></div>
       <div class="hub-dialog-actions">
         <button class="hub-dialog-btn cancel" id="hub-dialog-cancel">Cancel</button>

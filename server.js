@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const pty = require('node-pty');
 const { WebSocketServer, WebSocket } = require('ws');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 
 // --- CLI argument parsing ---
@@ -26,6 +27,8 @@ const BLOCKED_FLAGS = new Set([
   '--help', '-h',                    // exits immediately
   '--init-only',                     // exits immediately
   '--maintenance',                   // exits immediately
+  '--token',                         // bridge-only: auth token
+  '--no-auth',                       // bridge-only: disable auth
 ]);
 
 // Flags that consume the next argument as a value
@@ -42,6 +45,7 @@ const FLAGS_WITH_VALUE = new Set([
   '--output-format', '--input-format', '--json-schema',
   '--max-budget-usd', '--max-turns', '--fallback-model',
   '--permission-prompt-tool',
+  '--token',                         // bridge-only: auth token
 ]);
 
 function parseCliArgs(argv) {
@@ -49,6 +53,8 @@ function parseCliArgs(argv) {
   let cwd = null;
   const claudeArgs = [];
   const blocked = [];
+  let token = null;
+  let noAuth = false;
 
   let i = 0;
   while (i < rawArgs.length) {
@@ -75,6 +81,25 @@ function parseCliArgs(argv) {
     const eqIdx = arg.indexOf('=');
     const flagName = eqIdx > 0 ? arg.substring(0, eqIdx) : arg;
 
+    // Intercept bridge-only flags
+    if (flagName === '--token') {
+      if (eqIdx > 0) {
+        token = arg.substring(eqIdx + 1);
+      } else if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith('-')) {
+        i++;
+        token = rawArgs[i];
+      } else {
+        token = '';
+      }
+      i++;
+      continue;
+    }
+    if (flagName === '--no-auth') {
+      noAuth = true;
+      i++;
+      continue;
+    }
+
     if (BLOCKED_FLAGS.has(flagName)) {
       blocked.push(flagName);
       if (eqIdx > 0) {
@@ -96,10 +121,36 @@ function parseCliArgs(argv) {
     i++;
   }
 
-  return { cwd: cwd || process.cwd(), claudeArgs, blocked };
+  return { cwd: cwd || process.cwd(), claudeArgs, blocked, token, noAuth };
 }
 
-const { cwd: _parsedCwd, claudeArgs: CLAUDE_EXTRA_ARGS, blocked: _blockedArgs } = parseCliArgs(process.argv);
+const { cwd: _parsedCwd, claudeArgs: CLAUDE_EXTRA_ARGS, blocked: _blockedArgs, token: _cliToken, noAuth: _cliNoAuth } = parseCliArgs(process.argv);
+
+// --- Auth token resolution ---
+const AUTH_TOKEN_ENV_VAR = 'CLAUDE_REMOTE_TOKEN';
+const LEGACY_AUTH_TOKEN_ENV_VAR = 'TOKEN';
+const AUTH_DISABLED = _cliNoAuth || process.env.NO_AUTH === '1';
+const TOKEN_FILE = path.join(os.homedir(), '.claude-remote-token');
+const UNUSED_LEGACY_TOKEN_ENV = !!process.env[LEGACY_AUTH_TOKEN_ENV_VAR] && !process.env[AUTH_TOKEN_ENV_VAR];
+
+function resolveAuthToken() {
+  if (AUTH_DISABLED) return null;
+  // 1. CLI --token
+  if (_cliToken) return _cliToken;
+  // 2. Namespaced env
+  if (process.env[AUTH_TOKEN_ENV_VAR]) return process.env[AUTH_TOKEN_ENV_VAR];
+  // 3. Persisted file
+  try {
+    const saved = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+    if (saved) return saved;
+  } catch {}
+  // 4. Generate and persist
+  const generated = crypto.randomBytes(24).toString('base64url');
+  try { fs.writeFileSync(TOKEN_FILE, generated + '\n', { mode: 0o600 }); } catch {}
+  return generated;
+}
+
+const AUTH_TOKEN = resolveAuthToken();
 
 // --- Config ---
 const PORT = parseInt(process.env.PORT || '3100', 10);
@@ -107,6 +158,11 @@ let CWD = _parsedCwd;
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const CLAUDE_STATE_FILE = path.join(os.homedir(), '.claude.json');
 const PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
+const AUTH_HELLO_TIMEOUT_MS = 5000;
+const WS_CLOSE_AUTH_FAILED = 4001;
+const WS_CLOSE_AUTH_TIMEOUT = 4002;
+const WS_CLOSE_REASON_AUTH_FAILED = 'auth_failed';
+const WS_CLOSE_REASON_AUTH_TIMEOUT = 'auth_timeout';
 
 // --- State ---
 let claudeProc = null;
@@ -160,6 +216,10 @@ function log(msg) {
 function wsLabel(ws) {
   const clientId = ws && ws._clientInstanceId ? ` client=${ws._clientInstanceId}` : '';
   return `ws#${ws && ws._bridgeId ? ws._bridgeId : '?'}${clientId}`;
+}
+
+function isAuthenticatedClient(ws) {
+  return !!ws && ws.readyState === WebSocket.OPEN && !!ws._authenticated;
 }
 
 function sendWs(ws, msg, context = '') {
@@ -400,7 +460,7 @@ const server = http.createServer((req, res) => {
       }
 
       // No WebUI clients → fall back to terminal prompt
-      const clients = [...wss.clients].filter(c => c.readyState === WebSocket.OPEN);
+      const clients = [...wss.clients].filter(isAuthenticatedClient);
       if (clients.length === 0) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ decision: 'ask' }));
@@ -506,7 +566,7 @@ function broadcast(msg) {
   const raw = JSON.stringify(msg);
   const recipients = [];
   for (const ws of wss.clients) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (isAuthenticatedClient(ws)) {
       ws.send(raw);
       recipients.push(wsLabel(ws));
     }
@@ -593,11 +653,7 @@ setInterval(() => {
   }
 }, 60 * 1000).unref();
 
-wss.on('connection', (ws, req) => {
-  ws._bridgeId = ++nextWsId;
-  ws._clientInstanceId = '';
-  log(`WS connected: ${wsLabel(ws)} remote=${req.socket.remoteAddress || '?'} ua=${JSON.stringify(req.headers['user-agent'] || '')}`);
-
+function sendInitialMessages(ws) {
   sendWs(ws, {
     type: 'status',
     status: claudeProc ? 'running' : 'starting',
@@ -615,19 +671,85 @@ wss.on('connection', (ws, req) => {
       lastSeq: latestEventSeq(),
     }, 'initial');
   }
+}
+
+function sendAuthOk(ws) {
+  sendWs(ws, {
+    type: 'auth_ok',
+    authRequired: !AUTH_DISABLED,
+  }, 'auth_ok');
+}
+
+wss.on('connection', (ws, req) => {
+  ws._bridgeId = ++nextWsId;
+  ws._clientInstanceId = '';
+  ws._authenticated = AUTH_DISABLED; // skip auth if disabled
+  ws._authTimer = null;
+  log(`WS connected: ${wsLabel(ws)} remote=${req.socket.remoteAddress || '?'} ua=${JSON.stringify(req.headers['user-agent'] || '')} authRequired=${!AUTH_DISABLED}`);
+
+  // If auth is disabled, send initial messages immediately
+  if (AUTH_DISABLED) {
+    sendAuthOk(ws);
+    sendInitialMessages(ws);
+  } else {
+    ws._authTimer = setTimeout(() => {
+      if (ws.readyState !== WebSocket.OPEN || ws._authenticated) return;
+      log(`Auth timeout for ${wsLabel(ws)}`);
+      ws.close(WS_CLOSE_AUTH_TIMEOUT, WS_CLOSE_REASON_AUTH_TIMEOUT);
+    }, AUTH_HELLO_TIMEOUT_MS);
+  }
 
   // New clients should explicitly request a resume window. Keep a delayed
   // full replay fallback so older clients still work.
   ws._resumeHandled = false;
-  ws._legacyReplayTimer = setTimeout(() => {
-    if (ws.readyState !== WebSocket.OPEN || ws._resumeHandled) return;
-    ws._resumeHandled = true;
-    sendReplay(ws, null);
-  }, LEGACY_REPLAY_DELAY_MS);
+  ws._legacyReplayTimer = null;
+  if (AUTH_DISABLED) {
+    ws._legacyReplayTimer = setTimeout(() => {
+      if (ws.readyState !== WebSocket.OPEN || ws._resumeHandled) return;
+      ws._resumeHandled = true;
+      sendReplay(ws, null);
+    }, LEGACY_REPLAY_DELAY_MS);
+  }
 
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+
+    // --- Authentication gate ---
+    if (!ws._authenticated) {
+      if (msg.type !== 'hello') return; // ignore non-hello when not authenticated
+      ws._clientInstanceId = String(msg.clientInstanceId || ws._clientInstanceId || '');
+      log(`WS hello from ${wsLabel(ws)} page=${JSON.stringify(msg.page || '')} ua=${JSON.stringify(msg.userAgent || '')}`);
+
+      const clientToken = String(msg.token || '');
+      if (!AUTH_TOKEN || !clientToken) {
+        log(`Auth failed for ${wsLabel(ws)}: missing token`);
+        ws.close(WS_CLOSE_AUTH_FAILED, WS_CLOSE_REASON_AUTH_FAILED);
+        return;
+      }
+      const a = Buffer.from(AUTH_TOKEN, 'utf8');
+      const b = Buffer.from(clientToken, 'utf8');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        log(`Auth failed for ${wsLabel(ws)}: invalid token`);
+        ws.close(WS_CLOSE_AUTH_FAILED, WS_CLOSE_REASON_AUTH_FAILED);
+        return;
+      }
+      ws._authenticated = true;
+      if (ws._authTimer) {
+        clearTimeout(ws._authTimer);
+        ws._authTimer = null;
+      }
+      log(`Auth OK for ${wsLabel(ws)}`);
+
+      sendAuthOk(ws);
+      sendInitialMessages(ws);
+      ws._legacyReplayTimer = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN || ws._resumeHandled) return;
+        ws._resumeHandled = true;
+        sendReplay(ws, null);
+      }, LEGACY_REPLAY_DELAY_MS);
+      return;
+    }
 
     switch (msg.type) {
       case 'hello':
@@ -940,6 +1062,10 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    if (ws._authTimer) {
+      clearTimeout(ws._authTimer);
+      ws._authTimer = null;
+    }
     if (ws._legacyReplayTimer) {
       clearTimeout(ws._legacyReplayTimer);
       ws._legacyReplayTimer = null;
@@ -1713,6 +1839,14 @@ server.listen(PORT, '0.0.0.0', () => {
   CWD:    ${CWD}
   Log:    ${LOG_FILE}
 `;
+  if (AUTH_DISABLED) {
+    banner += `  Auth:   DISABLED (no authentication)\n`;
+  } else {
+    banner += `  Token:  ${AUTH_TOKEN}\n`;
+  }
+  if (UNUSED_LEGACY_TOKEN_ENV) {
+    banner += `  Note:   Ignoring legacy ${LEGACY_AUTH_TOKEN_ENV_VAR}; use ${AUTH_TOKEN_ENV_VAR} instead\n`;
+  }
   if (CLAUDE_EXTRA_ARGS.length > 0) {
     banner += `  Args:   claude ${CLAUDE_EXTRA_ARGS.join(' ')}\n`;
   }

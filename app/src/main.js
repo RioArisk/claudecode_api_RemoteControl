@@ -22,6 +22,10 @@ const CHAT_CACHE_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const CHAT_CACHE_MAX_SESSION_BYTES = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const IMAGE_CHUNK_BYTES = 96 * 1024;
+const WS_CLOSE_AUTH_FAILED = 4001;
+const WS_CLOSE_AUTH_TIMEOUT = 4002;
+const WS_CLOSE_REASON_AUTH_FAILED = 'auth_failed';
+const WS_CLOSE_REASON_AUTH_TIMEOUT = 'auth_timeout';
 let chatCacheDbPromise = null;
 
 // ---- Hub state ----
@@ -44,6 +48,7 @@ function normalizeServerEntry(raw) {
     wsUrl: parsed.ok ? parsed.wsUrl : String(base.wsUrl || ''),
     cacheAddr: parsed.ok ? parsed.cacheAddr : String(base.cacheAddr || ''),
     alias: typeof base.alias === 'string' ? base.alias.trim() : '',
+    token: typeof base.token === 'string' ? base.token : '',
     addedAt: Number.isFinite(base.addedAt) ? base.addedAt : Date.now(),
     lastConnectedAt: Number.isFinite(base.lastConnectedAt) ? base.lastConnectedAt : 0,
   };
@@ -101,7 +106,7 @@ function findDuplicateServer(list, wsUrl, excludeId = null) {
   return list.find(server => server.id !== excludeId && getServerDedupKey(server) === `ws:${wsUrl}`);
 }
 
-function addServer(addr, alias) {
+function addServer(addr, alias, token) {
   const parsed = parseServerAddress(addr);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   let list = getSavedServers();
@@ -114,6 +119,7 @@ function addServer(addr, alias) {
     wsUrl: parsed.wsUrl,
     cacheAddr: parsed.cacheAddr,
     alias: (alias || '').trim(),
+    token: (token || '').trim(),
     addedAt: Date.now(),
     lastConnectedAt: 0,
   };
@@ -447,7 +453,28 @@ function probeServer(server) {
     try {
       const ws = new WebSocket(server.wsUrl);
       const timer = setTimeout(() => { try { ws.close(); } catch {} finish(false); }, HUB_PROBE_TIMEOUT_MS);
-      ws.onopen = () => { clearTimeout(timer); try { ws.close(); } catch {} finish(true); };
+      ws.onopen = () => {
+        try {
+          ws.send(JSON.stringify({
+            type: 'hello',
+            clientInstanceId: `hub_probe_${Date.now().toString(36)}`,
+            token: server.token || '',
+            page: '/hub-probe',
+            userAgent: navigator.userAgent || '',
+          }));
+        } catch {
+          clearTimeout(timer);
+          finish(false);
+        }
+      };
+      ws.onmessage = (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch { return; }
+        if (!isAuthReadyMessage(msg)) return;
+        clearTimeout(timer);
+        try { ws.close(); } catch {}
+        finish(true);
+      };
       ws.onerror = () => { clearTimeout(timer); finish(false); };
       ws.onclose = () => { clearTimeout(timer); if (!done) finish(false); };
     } catch { finish(false); }
@@ -534,6 +561,7 @@ function connectToServer(serverId) {
   serverAddr = s.addr;
   serverWsUrl = s.wsUrl;
   serverCacheAddr = s.cacheAddr;
+  serverToken = s.token || '';
   showHubConnectOverlay(s);
   renderHubCards();
   connect();
@@ -545,6 +573,8 @@ function openAddServerDialog() {
   $('hub-dialog-title').textContent = 'Add Server';
   $('hub-dialog-addr').value = '';
   $('hub-dialog-alias').value = '';
+  $('hub-dialog-token').value = '';
+  $('hub-dialog-token').type = 'password';
   $('hub-dialog-error').textContent = '';
   $('hub-dialog-delete').style.display = 'none';
   $('hub-add-overlay').classList.add('visible');
@@ -559,6 +589,8 @@ function openEditServerDialog(id) {
   $('hub-dialog-title').textContent = 'Edit Server';
   $('hub-dialog-addr').value = s.addr;
   $('hub-dialog-alias').value = s.alias || '';
+  $('hub-dialog-token').value = s.token || '';
+  $('hub-dialog-token').type = 'password';
   $('hub-dialog-error').textContent = '';
   $('hub-dialog-delete').style.display = '';
   $('hub-add-overlay').classList.add('visible');
@@ -573,6 +605,7 @@ function closeServerDialog() {
 function saveServerDialog() {
   const addr = $('hub-dialog-addr').value.trim();
   const alias = $('hub-dialog-alias').value.trim();
+  const token = $('hub-dialog-token').value.trim();
   if (!addr) { $('hub-dialog-error').textContent = 'Please enter a server address'; return; }
   const parsed = parseServerAddress(addr);
   if (!parsed.ok) { $('hub-dialog-error').textContent = parsed.error; return; }
@@ -591,6 +624,7 @@ function saveServerDialog() {
       s.wsUrl = parsed.wsUrl;
       s.cacheAddr = parsed.cacheAddr;
       s.alias = alias;
+      s.token = token;
       saveServerList(list);
       resetHubProbeInfo(s.id);
       clearHubRetry(s.id);
@@ -598,7 +632,7 @@ function saveServerDialog() {
     }
   } else {
     // Add new
-    const result = addServer(addr, alias);
+    const result = addServer(addr, alias, token);
     if (!result.ok) { $('hub-dialog-error').textContent = result.error || 'Invalid address'; return; }
     hubStatus.set(result.entry.id, createHubProbeInfo());
     runHubProbes([result.entry], { markUnknown: true });
@@ -642,6 +676,7 @@ startHubProbes();
 let serverAddr = '';
 let serverWsUrl = '';
 let serverCacheAddr = '';
+let serverToken = '';
 let pendingImage = null; // { file, mediaType, name, previewUrl, uploadId, status, progress, ... }
 
 // Hub button bindings
@@ -654,6 +689,10 @@ $('hub-add-overlay').addEventListener('click', (e) => {
 });
 $('hub-dialog-addr').addEventListener('keydown', e => {
   if (e.key === 'Enter') saveServerDialog();
+});
+$('hub-dialog-token-toggle').addEventListener('click', () => {
+  const inp = $('hub-dialog-token');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
 });
 
 function tryConnect() {
@@ -677,6 +716,34 @@ function showApp() {
   $('connect-screen').classList.add('hidden');
   $('app').classList.remove('hidden');
   saveServer(serverAddr);
+}
+
+function isAuthReadyMessage(msg) {
+  return !!msg && (
+    msg.type === 'auth_ok' ||
+    msg.type === 'status' ||
+    msg.type === 'transcript_ready' ||
+    msg.type === 'replay_done' ||
+    msg.type === 'turn_state'
+  );
+}
+
+function finalizeAuthenticatedConnection() {
+  if (S.authenticated) return;
+  S.authenticated = true;
+  setStatus('connected');
+  setConnBanner(false);
+  if ($('app').classList.contains('hidden')) {
+    showApp();
+    return;
+  }
+  hideHubConnectOverlay();
+  renderHubCards();
+  saveServer(serverAddr);
+}
+
+function isCloseEvent(event, code, reason) {
+  return !!event && event.code === code && (!reason || event.reason === reason);
 }
 
 const CLIENT_INSTANCE_KEY = 'claude_remote_client_instance_id';
@@ -762,6 +829,7 @@ function debugLog(event, detail = {}) {
 // ============================================================
 const S = {
   ws: null,
+  authenticated: false,
   sessionId: '',
   lastSeq: 0,
   lastMessageAt: 0,
@@ -2514,7 +2582,7 @@ $('image-file-input').addEventListener('change', async (e) => {
     showToast('Image too large (max 4MB)');
     return;
   }
-  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN || !S.authenticated) {
     showToast('Connection unavailable');
     return;
   }
@@ -2578,6 +2646,7 @@ $('btn-back').addEventListener('click', () => {
 function resetAppState() {
   clearForegroundProbe('reset_app_state');
   S.ws = null;
+  S.authenticated = false;
   S.sessionId = '';
   S.resumeRequestedFor = '';
   S.lastMessageAt = 0;
@@ -2599,7 +2668,7 @@ function resetAppState() {
 function send() {
   const t = $input.value.trim();
   const hasImage = !!pendingImage;
-  if ((!t && !hasImage) || !S.ws || S.ws.readyState !== WebSocket.OPEN || S.waiting) return;
+  if ((!t && !hasImage) || !S.ws || S.ws.readyState !== WebSocket.OPEN || !S.authenticated || S.waiting) return;
   debugLog('send_invoked', {
     hasImage,
     textPreview: t.slice(0, 80),
@@ -2675,6 +2744,7 @@ function connect() {
     return;
   }
   S.ws = ws;
+  S.authenticated = false;
   S.resumeRequestedFor = '';
   S.replaying = true;
   debugLog('ws_connect_start', {
@@ -2702,12 +2772,11 @@ function connect() {
     S.lastMessageAt = Date.now();
     S.intentionalDisconnect = false;
     S.skipNextCloseHandling = false;
-    setStatus('connected');
-    setConnBanner(false);
-    showApp();
+    setStatus('starting');
     ws.send(JSON.stringify({
       type: 'hello',
       clientInstanceId: CLIENT_INSTANCE_ID,
+      token: serverToken || '',
       page: location.pathname || '/',
       userAgent: navigator.userAgent || '',
     }));
@@ -2729,7 +2798,7 @@ function connect() {
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
     S.lastMessageAt = Date.now();
-    if (m.type === 'status' || m.type === 'transcript_ready' || m.type === 'replay_done' ||
+    if (m.type === 'auth_ok' || m.type === 'status' || m.type === 'transcript_ready' || m.type === 'replay_done' ||
         m.type === 'turn_state' || m.type === 'pty_exit') {
       debugLog('ws_message', {
         type: m.type,
@@ -2741,6 +2810,11 @@ function connect() {
       });
     }
     try {
+      if (!S.authenticated && isAuthReadyMessage(m)) {
+        finalizeAuthenticatedConnection();
+      }
+      if (!S.authenticated) return;
+      if (m.type === 'auth_ok') return;
       if (m.type === 'pty_output') { /* ignored — no terminal panel */ }
       else if (m.type === 'log_event') processEvent(m.event, m.seq);
       else if (m.type === 'image_upload_status') handleUploadStatus(m);
@@ -2823,6 +2897,7 @@ function connect() {
     clearTimeout(connectTimeout);
     if (!isCurrentSocket()) return;
     clearForegroundProbe('ws_close');
+    S.authenticated = false;
     hideHubConnectOverlay();
     renderHubCards();
     setStatus('disconnected');
@@ -2855,6 +2930,23 @@ function connect() {
       return;
     }
     if (S.intentionalDisconnect) return;
+
+    // Auth failure — don't auto-reconnect, prompt user to fix token
+    if (isCloseEvent(event, WS_CLOSE_AUTH_FAILED, WS_CLOSE_REASON_AUTH_FAILED)) {
+      showToast('Authentication failed — check your Token');
+      hideHubConnectOverlay();
+      renderHubCards();
+      // Open the edit dialog for the current server so user can fix token
+      const servers = getSavedServers();
+      const current = servers.find(x => x.wsUrl === serverWsUrl);
+      if (current) openEditServerDialog(current.id);
+      return;
+    }
+
+    if (isCloseEvent(event, WS_CLOSE_AUTH_TIMEOUT, WS_CLOSE_REASON_AUTH_TIMEOUT) && $('app').classList.contains('hidden')) {
+      failConnect('Handshake timed out - check client/server compatibility and try again');
+      return;
+    }
 
     if (!$('app').classList.contains('hidden')) {
       setConnBanner(true, true);
