@@ -129,6 +129,7 @@ let tailCatchingUp = false; // true while reading historical transcript content
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
 const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
+const IMAGE_UPLOAD_DIR = path.join(CLAUDE_HOME, 'remote-uploads');
 let turnStateVersion = 0;
 let turnState = {
   phase: 'idle',
@@ -566,14 +567,18 @@ function cleanupImageUpload(uploadId) {
 
 function cleanupClientUploads(ws) {
   for (const [uploadId, upload] of pendingImageUploads) {
-    if (upload.owner === ws) cleanupImageUpload(uploadId);
+    if (upload.owner === ws && !upload.submitted) cleanupImageUpload(uploadId);
   }
 }
 
 function createTempImageFile(buffer, mediaType, uploadId) {
-  const tmpDir = process.env.CLAUDE_CODE_TMPDIR || os.tmpdir();
+  const isLinux = process.platform !== 'win32' && process.platform !== 'darwin';
+  const tmpDir = isLinux
+    ? IMAGE_UPLOAD_DIR
+    : (process.env.CLAUDE_CODE_TMPDIR || os.tmpdir());
   const type = String(mediaType || 'image/png').toLowerCase();
   const ext = type.includes('jpeg') || type.includes('jpg') ? '.jpg' : '.png';
+  fs.mkdirSync(tmpDir, { recursive: true });
   const tmpFile = path.join(tmpDir, `bridge_upload_${uploadId}_${Date.now()}${ext}`);
   fs.writeFileSync(tmpFile, buffer);
   return tmpFile;
@@ -860,13 +865,16 @@ wss.on('connection', (ws, req) => {
           break;
         }
         try {
+          const shouldCleanupAfterSubmit = process.platform === 'win32' || process.platform === 'darwin';
           handlePreparedImageUpload({
             tmpFile: upload.tmpFile,
             mediaType: upload.mediaType,
             text: msg.text || '',
             logLabel: upload.name || uploadId,
-            onCleanup: () => cleanupImageUpload(uploadId),
+            onCleanup: shouldCleanupAfterSubmit ? () => cleanupImageUpload(uploadId) : null,
           });
+          upload.submitted = true;
+          upload.updatedAt = Date.now();
           setTurnState('running', { reason: 'image_submit' });
           sendUploadStatus(ws, uploadId, 'submitted');
         } catch (err) {
@@ -1493,10 +1501,26 @@ function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', on
 
   const isWin = process.platform === 'win32';
   const isMac = process.platform === 'darwin';
+  const isLinux = !isWin && !isMac;
 
   try {
     const stat = fs.statSync(tmpFile);
     log(`Image ready: ${logLabel || path.basename(tmpFile)} (${stat.size} bytes)`);
+
+    if (isLinux) {
+      const quotedPath = JSON.stringify(tmpFile);
+      const trimmedText = (text || '').trim();
+      const prompt = trimmedText
+        ? `Please analyze the image at this path: ${quotedPath}\n\nUser note:\n${trimmedText}`
+        : `Analyze this image: ${quotedPath}`;
+
+      claudeProc.write(prompt);
+      setTimeout(() => {
+        if (claudeProc) claudeProc.write('\r');
+        log(`Sent Linux image path prompt: ${tmpFile}`);
+      }, 150);
+      return;
+    }
 
     if (isWin) {
       const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
@@ -1563,6 +1587,11 @@ function handleImageUpload(msg) {
       mediaType: msg.mediaType,
       text: msg.text || '',
     });
+    if (process.platform !== 'win32' && process.platform !== 'darwin') {
+      setTimeout(() => {
+        try { fs.unlinkSync(tmpFile); } catch {}
+      }, IMAGE_UPLOAD_TTL_MS).unref();
+    }
     setTurnState('running', { reason: 'legacy_image_upload' });
   } catch (err) {
     log(`Image upload error: ${err.message}`);
