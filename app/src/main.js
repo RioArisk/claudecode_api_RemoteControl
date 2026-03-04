@@ -139,8 +139,17 @@ function saveServer(addr) {
 }
 
 function removeServer(id) {
-  let list = getSavedServers().filter(s => s.id !== id);
+  let list = getSavedServers();
+  const idx = list.findIndex(s => s.id === id);
+  if (idx < 0) return null;
+  const removed = list[idx];
+  list.splice(idx, 1);
   saveServerList(list);
+  const last = localStorage.getItem(LAST_KEY) || '';
+  if (removed && (last === removed.addr || last === removed.wsUrl || last === removed.cacheAddr)) {
+    localStorage.removeItem(LAST_KEY);
+  }
+  return removed;
 }
 
 function updateServerAlias(id, alias) {
@@ -644,13 +653,44 @@ function saveServerDialog() {
 function deleteServerFromDialog() {
   if (!hubEditingServerId) return;
   const id = hubEditingServerId;
+  const servers = getSavedServers();
+  const target = servers.find(x => x.id === id) || null;
+  const deletingCurrent = !!target && (
+    (!!serverWsUrl && target.wsUrl === serverWsUrl) ||
+    (!!serverAddr && target.addr === serverAddr) ||
+    (!!serverCacheAddr && target.cacheAddr === serverCacheAddr)
+  );
+  const deletingConnecting = hubConnectingServerId === id;
   // Use the existing confirm overlay
   $('confirm-text').textContent = 'Delete this server?';
   $('confirm-overlay').classList.add('visible');
   const onOk = () => {
-    removeServer(id);
+    const removed = removeServer(id);
     hubStatus.delete(id);
     clearHubRetry(id);
+    if (deletingConnecting) {
+      hubConnectingServerId = null;
+      hideHubConnectOverlay();
+    }
+    if (deletingCurrent || deletingConnecting || (removed && removed.wsUrl === serverWsUrl)) {
+      if (S.reconnectTimer) { clearTimeout(S.reconnectTimer); S.reconnectTimer = null; }
+      const hadWs = !!S.ws;
+      S.intentionalDisconnect = hadWs;
+      S.skipNextCloseHandling = hadWs;
+      if (S.ws) {
+        try { S.ws.close(); } catch {}
+      } else {
+        S.intentionalDisconnect = false;
+        S.skipNextCloseHandling = false;
+      }
+      serverAddr = '';
+      serverWsUrl = '';
+      serverCacheAddr = '';
+      serverToken = '';
+      localStorage.removeItem(LAST_KEY);
+      resetAppState();
+      showConnectScreen();
+    }
     closeServerDialog();
     renderHubCards();
     cleanup();
