@@ -3,5 +3,6 @@ bridge.log
 .claude/
 *.webp
 .npm-cache-publish/
+.npm-cache/
 app/.idea/
 *.tgz

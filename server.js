@@ -186,6 +186,7 @@ let tailCatchingUp = false; // true while reading historical transcript content
 const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
 const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
+const LINUX_CLIPBOARD_READY_GRACE_MS = 400;
 const IMAGE_UPLOAD_DIR = path.join(CLAUDE_HOME, 'remote-uploads');
 let turnStateVersion = 0;
 let turnState = {
@@ -198,6 +199,7 @@ let ttyInputForwarderAttached = false;
 let ttyInputHandler = null;
 let ttyResizeHandler = null;
 let activeLinuxClipboardProc = null;
+let linuxImagePasteInFlight = false;
 
 // --- Permission approval state ---
 let approvalSeq = 0;
@@ -694,66 +696,130 @@ function createTempImageFile(buffer, mediaType, uploadId) {
   return tmpFile;
 }
 
-function getLinuxClipboardTool() {
-  if (process.platform === 'win32' || process.platform === 'darwin') return null;
+function isLinuxClipboardToolInstalled(tool) {
   try {
-    execSync('command -v xclip >/dev/null 2>&1', {
+    execSync(`command -v ${tool} >/dev/null 2>&1`, {
       stdio: 'ignore',
       shell: '/bin/sh',
       timeout: 2000,
     });
-    return 'xclip';
-  } catch {}
-  try {
-    execSync('command -v wl-copy >/dev/null 2>&1', {
-      stdio: 'ignore',
-      shell: '/bin/sh',
-      timeout: 2000,
-    });
-    return 'wl-copy';
-  } catch {}
-  return null;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function setLinuxImagePasteInFlight(active, reason = '') {
+  linuxImagePasteInFlight = !!active;
+  if (reason) log(`Linux image paste lock=${linuxImagePasteInFlight ? 'on' : 'off'} reason=${reason}`);
+}
+
+function getLinuxClipboardToolCandidates() {
+  if (process.platform === 'win32' || process.platform === 'darwin') return [];
+  const preferred = [];
+  if (process.env.WAYLAND_DISPLAY) preferred.push('wl-copy');
+  if (process.env.DISPLAY) preferred.push('xclip');
+  return preferred;
 }
 
 function assertLinuxClipboardAvailable() {
-  const tool = getLinuxClipboardTool();
-  if (tool) return tool;
-  throw new Error('Linux image paste requires xclip or wl-copy on the server. Install one and try again.');
+  const candidates = getLinuxClipboardToolCandidates();
+  const available = candidates.filter(isLinuxClipboardToolInstalled);
+  if (available.length > 0) return available;
+  if (!process.env.WAYLAND_DISPLAY && !process.env.DISPLAY) {
+    throw new Error('Linux image paste requires an active graphical session (WAYLAND_DISPLAY or DISPLAY).');
+  }
+  throw new Error('Linux image paste requires wl-copy or xclip on the server. Install a matching clipboard tool and try again.');
 }
 
-function startLinuxClipboardImage(tmpFile, mediaType) {
+function spawnLinuxClipboardTool(tool, imageBuffer, type) {
+  return new Promise((resolve, reject) => {
+    const args = tool === 'xclip'
+      ? ['-quiet', '-selection', 'clipboard', '-t', type, '-i']
+      : ['--type', type];
+    const child = spawn(tool, args, {
+      detached: true,
+      stdio: ['pipe', 'ignore', 'pipe'],
+    });
+    let settled = false;
+    let stderr = '';
+    let readyTimer = null;
+
+    const settleFailure = (message) => {
+      if (settled) return;
+      settled = true;
+      if (readyTimer) clearTimeout(readyTimer);
+      if (child.exitCode == null && child.signalCode == null) {
+        try { child.kill('SIGTERM'); } catch {}
+      }
+      reject(new Error(message));
+    };
+
+    const settleSuccess = (trackProcess = true) => {
+      if (settled) return;
+      settled = true;
+      if (readyTimer) clearTimeout(readyTimer);
+      if (trackProcess && child.exitCode == null && child.signalCode == null) {
+        activeLinuxClipboardProc = { child, tool };
+        child.unref();
+      }
+      resolve(tool);
+    };
+
+    child.on('error', (err) => {
+      log(`Linux clipboard process error (${tool}): ${err.message}`);
+      settleFailure(`Linux clipboard tool ${tool} failed: ${err.message}`);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+      if (stderr.length > 2000) stderr = stderr.slice(-2000);
+    });
+    child.on('exit', (code, signal) => {
+      if (activeLinuxClipboardProc && activeLinuxClipboardProc.child === child) activeLinuxClipboardProc = null;
+      const extra = stderr.trim() ? ` stderr=${JSON.stringify(stderr.trim())}` : '';
+      log(`Linux clipboard process exited (${tool}) code=${code ?? 'null'} signal=${signal ?? 'null'}${extra}`);
+      if (!settled) {
+        if (tool === 'xclip' && code === 0 && !signal && !stderr.trim()) {
+          log('Linux clipboard xclip exited cleanly without stderr; treating clipboard arm as successful');
+          settleSuccess(false);
+          return;
+        }
+        const detail = stderr.trim() || `exit code ${code ?? 'null'} signal ${signal ?? 'null'}`;
+        settleFailure(`Linux clipboard tool ${tool} exited before paste: ${detail}`);
+      }
+    });
+    child.stdin.on('error', (err) => {
+      if (err.code === 'EPIPE') {
+        settleFailure(`Linux clipboard tool ${tool} closed its input early`);
+        return;
+      }
+      log(`Linux clipboard stdin error (${tool}): ${err.message}`);
+      settleFailure(`Linux clipboard tool ${tool} stdin failed: ${err.message}`);
+    });
+
+    child.stdin.end(imageBuffer);
+    log(`Linux clipboard process started (${tool}) pid=${child.pid ?? 'null'} type=${type} bytes=${imageBuffer.length}`);
+    readyTimer = setTimeout(() => settleSuccess(), LINUX_CLIPBOARD_READY_GRACE_MS);
+  });
+}
+
+async function startLinuxClipboardImage(tmpFile, mediaType) {
   const type = String(mediaType || 'image/png').toLowerCase();
-  const tool = assertLinuxClipboardAvailable();
   const imageBuffer = fs.readFileSync(tmpFile);
+  const availableTools = assertLinuxClipboardAvailable();
   clearActiveLinuxClipboardProc('replace');
-  const args = tool === 'xclip'
-    ? ['-selection', 'clipboard', '-t', type, '-i']
-    : ['--type', type];
-  const child = spawn(tool, args, {
-    detached: true,
-    stdio: ['pipe', 'ignore', 'pipe'],
-  });
-  activeLinuxClipboardProc = { child, tool };
-  let stderr = '';
-  child.on('error', (err) => {
-    log(`Linux clipboard process error (${tool}): ${err.message}`);
-  });
-  child.stderr.on('data', (chunk) => {
-    stderr += chunk.toString('utf8');
-    if (stderr.length > 2000) stderr = stderr.slice(-2000);
-  });
-  child.on('exit', (code, signal) => {
-    if (activeLinuxClipboardProc && activeLinuxClipboardProc.child === child) activeLinuxClipboardProc = null;
-    const extra = stderr.trim() ? ` stderr=${JSON.stringify(stderr.trim())}` : '';
-    log(`Linux clipboard process exited (${tool}) code=${code ?? 'null'} signal=${signal ?? 'null'}${extra}`);
-  });
-  child.stdin.on('error', (err) => {
-    if (err.code !== 'EPIPE') log(`Linux clipboard stdin error (${tool}): ${err.message}`);
-  });
-  child.stdin.end(imageBuffer);
-  child.unref();
-  log(`Linux clipboard process started (${tool}) pid=${child.pid ?? 'null'} type=${type} bytes=${imageBuffer.length}`);
-  return tool;
+
+  let lastErr = null;
+  for (const tool of availableTools) {
+    try {
+      return await spawnLinuxClipboardTool(tool, imageBuffer, type);
+    } catch (err) {
+      lastErr = err;
+      log(`Linux clipboard arm failed (${tool}): ${err.message}`);
+    }
+  }
+
+  throw lastErr || new Error('Linux clipboard could not be initialized');
 }
 
 setInterval(() => {
@@ -1007,8 +1073,8 @@ wss.on('connection', (ws, req) => {
         cleanupImageUpload(uploadId);
         if (process.platform !== 'win32' && process.platform !== 'darwin') {
           try {
-            const tool = assertLinuxClipboardAvailable();
-            log(`Linux clipboard preflight OK: ${tool}`);
+            const tools = assertLinuxClipboardAvailable();
+            log(`Linux clipboard preflight OK: ${tools.join(', ')}`);
           } catch (err) {
             sendUploadStatus(ws, uploadId, 'error', { message: err.message });
             break;
@@ -1116,7 +1182,7 @@ wss.on('connection', (ws, req) => {
           break;
         }
         try {
-          handlePreparedImageUpload({
+          await handlePreparedImageUpload({
             tmpFile: upload.tmpFile,
             mediaType: upload.mediaType,
             text: msg.text || '',
@@ -1749,15 +1815,20 @@ function restartClaude(newCwd) {
 // ============================================================
 //  5. Image Upload → Clipboard Injection
 // ============================================================
-function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', onCleanup = null }) {
+async function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', onCleanup = null }) {
   if (!claudeProc) throw new Error('Claude not running');
   if (!tmpFile || !fs.existsSync(tmpFile)) throw new Error('Prepared image file missing');
 
   const isWin = process.platform === 'win32';
   const isMac = process.platform === 'darwin';
+  const isLinux = !isWin && !isMac;
+  if (isLinux && linuxImagePasteInFlight) {
+    throw new Error('Another Linux image paste is still in progress. Please wait a moment and try again.');
+  }
   try {
     const stat = fs.statSync(tmpFile);
     log(`Image ready: ${logLabel || path.basename(tmpFile)} (${stat.size} bytes)`);
+    if (isLinux) setLinuxImagePasteInFlight(true, 'prepare_upload');
 
     if (isWin) {
       const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
@@ -1765,42 +1836,60 @@ function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', on
     } else if (isMac) {
       execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as 芦class PNGf禄)'`, { timeout: 10000 });
     } else {
-      const tool = startLinuxClipboardImage(tmpFile, mediaType);
+      const tool = await startLinuxClipboardImage(tmpFile, mediaType);
       log(`Linux clipboard armed with ${tool}`);
     }
     log('Clipboard set with image');
 
     const pasteDelayMs = isWin || isMac ? 0 : 150;
-    setTimeout(() => {
-      if (!claudeProc) return;
-      if (isWin) claudeProc.write('\x1bv');
-      else claudeProc.write('\x16');
-      log('Sent image paste keypress to PTY');
-    }, pasteDelayMs);
-
-    setTimeout(() => {
-      if (!claudeProc) return;
-      const trimmedText = (text || '').trim();
-      if (trimmedText) claudeProc.write(trimmedText);
-
+    await new Promise((resolve, reject) => {
       setTimeout(() => {
-        if (claudeProc) claudeProc.write('\r');
-        log('Sent Enter after image paste' + (trimmedText ? ` + text: "${trimmedText.substring(0, 60)}"` : ''));
-
-        if (!isWin && !isMac) {
-          setTimeout(() => clearActiveLinuxClipboardProc('post-paste'), 1000);
+        if (!claudeProc) {
+          reject(new Error('Claude stopped before image paste'));
+          return;
         }
+        if (isWin) claudeProc.write('\x1bv');
+        else claudeProc.write('\x16');
+        log('Sent image paste keypress to PTY');
 
         setTimeout(() => {
-          if (onCleanup) onCleanup();
-          else {
-            try { fs.unlinkSync(tmpFile); } catch {}
+          if (!claudeProc) {
+            reject(new Error('Claude stopped before image prompt'));
+            return;
           }
-        }, 5000);
-      }, 150);
-    }, 1000 + pasteDelayMs);
+          const trimmedText = (text || '').trim();
+          if (trimmedText) claudeProc.write(trimmedText);
+
+          setTimeout(() => {
+            if (!claudeProc) {
+              reject(new Error('Claude stopped before image submit'));
+              return;
+            }
+            claudeProc.write('\r');
+            log('Sent Enter after image paste' + (trimmedText ? ` + text: "${trimmedText.substring(0, 60)}"` : ''));
+
+            if (isLinux) {
+              setTimeout(() => clearActiveLinuxClipboardProc('post-paste'), 1000);
+            }
+
+            setTimeout(() => {
+              if (isLinux) setLinuxImagePasteInFlight(false, 'cleanup');
+              if (onCleanup) onCleanup();
+              else {
+                try { fs.unlinkSync(tmpFile); } catch {}
+              }
+            }, 5000);
+            resolve();
+          }, 150);
+        }, 1000);
+      }, pasteDelayMs);
+    });
   } catch (err) {
     log(`Image upload error: ${err.message}`);
+    if (isLinux) {
+      clearActiveLinuxClipboardProc('error');
+      setLinuxImagePasteInFlight(false, 'error');
+    }
     if (onCleanup) onCleanup();
     else {
       try { fs.unlinkSync(tmpFile); } catch {}
@@ -1822,8 +1911,8 @@ function handleImageUpload(msg) {
 
   try {
     if (process.platform !== 'win32' && process.platform !== 'darwin') {
-      const tool = assertLinuxClipboardAvailable();
-      log(`Linux clipboard preflight OK (legacy upload): ${tool}`);
+      const tools = assertLinuxClipboardAvailable();
+      log(`Linux clipboard preflight OK (legacy upload): ${tools.join(', ')}`);
     }
     const buf = Buffer.from(msg.base64, 'base64');
     tmpFile = createTempImageFile(buf, msg.mediaType, `legacy_${Date.now()}`);
@@ -1832,8 +1921,11 @@ function handleImageUpload(msg) {
       tmpFile,
       mediaType: msg.mediaType,
       text: msg.text || '',
+    }).then(() => {
+      setTurnState('running', { reason: 'legacy_image_upload' });
+    }).catch((err) => {
+      log(`Image upload error: ${err.message}`);
     });
-    setTurnState('running', { reason: 'legacy_image_upload' });
   } catch (err) {
     log(`Image upload error: ${err.message}`);
     try { fs.unlinkSync(tmpFile); } catch {}
