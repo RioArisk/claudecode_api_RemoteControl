@@ -644,6 +644,37 @@ function createTempImageFile(buffer, mediaType, uploadId) {
   return tmpFile;
 }
 
+function shellQuote(value) {
+  return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
+}
+
+function getLinuxClipboardTool() {
+  if (process.platform === 'win32' || process.platform === 'darwin') return null;
+  try {
+    execSync('command -v xclip >/dev/null 2>&1', {
+      stdio: 'ignore',
+      shell: '/bin/sh',
+      timeout: 2000,
+    });
+    return 'xclip';
+  } catch {}
+  try {
+    execSync('command -v wl-copy >/dev/null 2>&1', {
+      stdio: 'ignore',
+      shell: '/bin/sh',
+      timeout: 2000,
+    });
+    return 'wl-copy';
+  } catch {}
+  return null;
+}
+
+function assertLinuxClipboardAvailable() {
+  const tool = getLinuxClipboardTool();
+  if (tool) return tool;
+  throw new Error('Linux image paste requires xclip or wl-copy on the server. Install one and try again.');
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [uploadId, upload] of pendingImageUploads) {
@@ -885,6 +916,15 @@ wss.on('connection', (ws, req) => {
           break;
         }
         cleanupImageUpload(uploadId);
+        if (process.platform !== 'win32' && process.platform !== 'darwin') {
+          try {
+            const tool = assertLinuxClipboardAvailable();
+            log(`Linux clipboard preflight OK: ${tool}`);
+          } catch (err) {
+            sendUploadStatus(ws, uploadId, 'error', { message: err.message });
+            break;
+          }
+        }
         pendingImageUploads.set(uploadId, {
           id: uploadId,
           owner: ws,
@@ -987,13 +1027,12 @@ wss.on('connection', (ws, req) => {
           break;
         }
         try {
-          const shouldCleanupAfterSubmit = process.platform === 'win32' || process.platform === 'darwin';
           handlePreparedImageUpload({
             tmpFile: upload.tmpFile,
             mediaType: upload.mediaType,
             text: msg.text || '',
             logLabel: upload.name || uploadId,
-            onCleanup: shouldCleanupAfterSubmit ? () => cleanupImageUpload(uploadId) : null,
+            onCleanup: () => cleanupImageUpload(uploadId),
           });
           upload.submitted = true;
           upload.updatedAt = Date.now();
@@ -1627,26 +1666,9 @@ function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', on
 
   const isWin = process.platform === 'win32';
   const isMac = process.platform === 'darwin';
-  const isLinux = !isWin && !isMac;
-
   try {
     const stat = fs.statSync(tmpFile);
     log(`Image ready: ${logLabel || path.basename(tmpFile)} (${stat.size} bytes)`);
-
-    if (isLinux) {
-      const quotedPath = JSON.stringify(tmpFile);
-      const trimmedText = (text || '').trim();
-      const prompt = trimmedText
-        ? `Please analyze the image at this path: ${quotedPath}\n\nUser note:\n${trimmedText}`
-        : `Analyze this image: ${quotedPath}`;
-
-      claudeProc.write(prompt);
-      setTimeout(() => {
-        if (claudeProc) claudeProc.write('\r');
-        log(`Sent Linux image path prompt: ${tmpFile}`);
-      }, 150);
-      return;
-    }
 
     if (isWin) {
       const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
@@ -1654,11 +1676,22 @@ function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', on
     } else if (isMac) {
       execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as 芦class PNGf禄)'`, { timeout: 10000 });
     } else {
-      try {
-        execSync(`xclip -selection clipboard -t image/png -i < "${tmpFile}"`, { timeout: 10000, shell: true });
-      } catch {
-        execSync(`wl-copy --type image/png < "${tmpFile}"`, { timeout: 10000, shell: true });
+      const type = String(mediaType || 'image/png').toLowerCase();
+      const tool = assertLinuxClipboardAvailable();
+      const quotedPath = shellQuote(tmpFile);
+      const quotedType = shellQuote(type);
+      if (tool === 'xclip') {
+        execSync(`xclip -selection clipboard -t ${quotedType} -i < ${quotedPath}`, {
+          timeout: 10000,
+          shell: '/bin/sh',
+        });
+      } else {
+        execSync(`wl-copy --type ${quotedType} < ${quotedPath}`, {
+          timeout: 10000,
+          shell: '/bin/sh',
+        });
       }
+      log(`Linux clipboard set with ${tool} (${type})`);
     }
     log('Clipboard set with image');
 
@@ -1702,22 +1735,21 @@ function handleImageUpload(msg) {
     log('Image upload ignored: no base64 data');
     return;
   }
-
-  const buf = Buffer.from(msg.base64, 'base64');
-  const tmpFile = createTempImageFile(buf, msg.mediaType, `legacy_${Date.now()}`);
+  let tmpFile = null;
 
   try {
+    if (process.platform !== 'win32' && process.platform !== 'darwin') {
+      const tool = assertLinuxClipboardAvailable();
+      log(`Linux clipboard preflight OK (legacy upload): ${tool}`);
+    }
+    const buf = Buffer.from(msg.base64, 'base64');
+    tmpFile = createTempImageFile(buf, msg.mediaType, `legacy_${Date.now()}`);
     log(`Image saved: ${tmpFile} (${buf.length} bytes)`);
     handlePreparedImageUpload({
       tmpFile,
       mediaType: msg.mediaType,
       text: msg.text || '',
     });
-    if (process.platform !== 'win32' && process.platform !== 'darwin') {
-      setTimeout(() => {
-        try { fs.unlinkSync(tmpFile); } catch {}
-      }, IMAGE_UPLOAD_TTL_MS).unref();
-    }
     setTurnState('running', { reason: 'legacy_image_upload' });
   } catch (err) {
     log(`Image upload error: ${err.message}`);
