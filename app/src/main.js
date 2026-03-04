@@ -1076,6 +1076,9 @@ function localizeToastText(text) {
   ]);
 
   if (directMap.has(raw)) return directMap.get(raw);
+  if (raw.startsWith('Linux image paste requires a graphical session.')) {
+    return 'Linux 服务端缺少图形会话环境变量\n请在 pm2/systemd 中设置 DISPLAY 或 WAYLAND_DISPLAY 后重试';
+  }
   if (raw.startsWith('Now using ')) {
     return `已切换模型\n${raw.slice('Now using '.length)}`;
   }

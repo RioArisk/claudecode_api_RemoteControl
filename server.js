@@ -714,25 +714,226 @@ function setLinuxImagePasteInFlight(active, reason = '') {
   if (reason) log(`Linux image paste lock=${linuxImagePasteInFlight ? 'on' : 'off'} reason=${reason}`);
 }
 
-function getLinuxClipboardToolCandidates() {
+function normalizeLinuxEnvVar(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
+function parseLinuxProcStatusUid(statusText) {
+  const match = String(statusText || '').match(/^Uid:\s+(\d+)/m);
+  return match ? Number(match[1]) : null;
+}
+
+function readLinuxProcGuiEnv(pid) {
+  try {
+    const statusPath = `/proc/${pid}/status`;
+    const environPath = `/proc/${pid}/environ`;
+    const statusText = fs.readFileSync(statusPath, 'utf8');
+    const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
+    if (currentUid != null) {
+      const procUid = parseLinuxProcStatusUid(statusText);
+      if (procUid == null || procUid !== currentUid) return null;
+    }
+
+    const envRaw = fs.readFileSync(environPath, 'utf8');
+    if (!envRaw) return null;
+    let waylandDisplay = null;
+    let display = null;
+    let runtimeDir = null;
+    let xAuthority = null;
+
+    for (const entry of envRaw.split('\0')) {
+      if (!entry) continue;
+      if (entry.startsWith('WAYLAND_DISPLAY=')) waylandDisplay = normalizeLinuxEnvVar(entry.slice('WAYLAND_DISPLAY='.length));
+      else if (entry.startsWith('DISPLAY=')) display = normalizeLinuxEnvVar(entry.slice('DISPLAY='.length));
+      else if (entry.startsWith('XDG_RUNTIME_DIR=')) runtimeDir = normalizeLinuxEnvVar(entry.slice('XDG_RUNTIME_DIR='.length));
+      else if (entry.startsWith('XAUTHORITY=')) xAuthority = normalizeLinuxEnvVar(entry.slice('XAUTHORITY='.length));
+    }
+
+    if (!waylandDisplay && !display) return null;
+    return { waylandDisplay, display, runtimeDir, xAuthority };
+  } catch {
+    return null;
+  }
+}
+
+function discoverLinuxGuiEnvFromProc() {
+  if (process.platform === 'win32' || process.platform === 'darwin') return null;
+  let entries = [];
+  try {
+    entries = fs.readdirSync('/proc', { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (!/^\d+$/.test(entry.name)) continue;
+    if (Number(entry.name) === process.pid) continue;
+    const discovered = readLinuxProcGuiEnv(entry.name);
+    if (discovered) return discovered;
+  }
+  return null;
+}
+
+function discoverLinuxGuiEnvFromSocket() {
+  if (process.platform === 'win32' || process.platform === 'darwin') return null;
+  const discovered = {
+    waylandDisplay: null,
+    display: null,
+    runtimeDir: null,
+    xAuthority: null,
+  };
+
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const runtimeDir = currentUid != null ? `/run/user/${currentUid}` : null;
+  if (runtimeDir && fs.existsSync(runtimeDir)) {
+    discovered.runtimeDir = runtimeDir;
+    try {
+      const entries = fs.readdirSync(runtimeDir);
+      const waylandSockets = entries.filter(name => /^wayland-\d+$/.test(name)).sort();
+      if (waylandSockets.length > 0) discovered.waylandDisplay = waylandSockets[0];
+    } catch {}
+  }
+
+  try {
+    const xEntries = fs.readdirSync('/tmp/.X11-unix');
+    const displaySockets = xEntries
+      .map(name => {
+        const match = /^X(\d+)$/.exec(name);
+        return match ? Number(match[1]) : null;
+      })
+      .filter(num => Number.isInteger(num))
+      .sort((a, b) => a - b);
+    if (displaySockets.length > 0) discovered.display = `:${displaySockets[0]}`;
+  } catch {}
+
+  if (!discovered.waylandDisplay && !discovered.display) return null;
+  return discovered;
+}
+
+function getLinuxClipboardEnv() {
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    return { env: process.env, source: 'not_linux' };
+  }
+
+  const overlay = {
+    WAYLAND_DISPLAY: normalizeLinuxEnvVar(process.env.CLAUDE_REMOTE_WAYLAND_DISPLAY) || normalizeLinuxEnvVar(process.env.WAYLAND_DISPLAY),
+    DISPLAY: normalizeLinuxEnvVar(process.env.CLAUDE_REMOTE_DISPLAY) || normalizeLinuxEnvVar(process.env.DISPLAY),
+    XDG_RUNTIME_DIR: normalizeLinuxEnvVar(process.env.CLAUDE_REMOTE_XDG_RUNTIME_DIR) || normalizeLinuxEnvVar(process.env.XDG_RUNTIME_DIR),
+    XAUTHORITY: normalizeLinuxEnvVar(process.env.CLAUDE_REMOTE_XAUTHORITY) || normalizeLinuxEnvVar(process.env.XAUTHORITY),
+  };
+
+  let source = 'process_env';
+  const needsSocketDiscovery =
+    (!overlay.WAYLAND_DISPLAY && !overlay.DISPLAY) ||
+    (!!overlay.WAYLAND_DISPLAY && !overlay.XDG_RUNTIME_DIR);
+  if (needsSocketDiscovery) {
+    const before = {
+      waylandDisplay: overlay.WAYLAND_DISPLAY,
+      display: overlay.DISPLAY,
+      runtimeDir: overlay.XDG_RUNTIME_DIR,
+      xAuthority: overlay.XAUTHORITY,
+    };
+    const fromSocket = discoverLinuxGuiEnvFromSocket();
+    if (fromSocket) {
+      if (!overlay.WAYLAND_DISPLAY && fromSocket.waylandDisplay) overlay.WAYLAND_DISPLAY = fromSocket.waylandDisplay;
+      if (!overlay.DISPLAY && fromSocket.display) overlay.DISPLAY = fromSocket.display;
+      if (!overlay.XDG_RUNTIME_DIR && fromSocket.runtimeDir) overlay.XDG_RUNTIME_DIR = fromSocket.runtimeDir;
+      if (!overlay.XAUTHORITY && fromSocket.xAuthority) overlay.XAUTHORITY = fromSocket.xAuthority;
+      const changed =
+        before.waylandDisplay !== overlay.WAYLAND_DISPLAY ||
+        before.display !== overlay.DISPLAY ||
+        before.runtimeDir !== overlay.XDG_RUNTIME_DIR ||
+        before.xAuthority !== overlay.XAUTHORITY;
+      if (changed) source = 'socket_discovery';
+    }
+  }
+
+  const needsProcDiscovery =
+    (!overlay.WAYLAND_DISPLAY && !overlay.DISPLAY) ||
+    (!!overlay.DISPLAY && !overlay.XAUTHORITY) ||
+    (!!overlay.WAYLAND_DISPLAY && !overlay.XDG_RUNTIME_DIR);
+  if (needsProcDiscovery) {
+    const before = {
+      waylandDisplay: overlay.WAYLAND_DISPLAY,
+      display: overlay.DISPLAY,
+      runtimeDir: overlay.XDG_RUNTIME_DIR,
+      xAuthority: overlay.XAUTHORITY,
+    };
+    const fromProc = discoverLinuxGuiEnvFromProc();
+    if (fromProc) {
+      if (!overlay.WAYLAND_DISPLAY && fromProc.waylandDisplay) overlay.WAYLAND_DISPLAY = fromProc.waylandDisplay;
+      if (!overlay.DISPLAY && fromProc.display) overlay.DISPLAY = fromProc.display;
+      if (!overlay.XDG_RUNTIME_DIR && fromProc.runtimeDir) overlay.XDG_RUNTIME_DIR = fromProc.runtimeDir;
+      if (!overlay.XAUTHORITY && fromProc.xAuthority) overlay.XAUTHORITY = fromProc.xAuthority;
+      const changed =
+        before.waylandDisplay !== overlay.WAYLAND_DISPLAY ||
+        before.display !== overlay.DISPLAY ||
+        before.runtimeDir !== overlay.XDG_RUNTIME_DIR ||
+        before.xAuthority !== overlay.XAUTHORITY;
+      if (changed) {
+        source = source === 'socket_discovery' ? 'socket+proc_discovery' : 'proc_discovery';
+      }
+    }
+  }
+
+  const env = { ...process.env };
+  if (overlay.WAYLAND_DISPLAY) env.WAYLAND_DISPLAY = overlay.WAYLAND_DISPLAY;
+  if (overlay.DISPLAY) env.DISPLAY = overlay.DISPLAY;
+  if (overlay.XDG_RUNTIME_DIR) env.XDG_RUNTIME_DIR = overlay.XDG_RUNTIME_DIR;
+  if (overlay.XAUTHORITY) env.XAUTHORITY = overlay.XAUTHORITY;
+
+  return {
+    env,
+    source,
+    waylandDisplay: overlay.WAYLAND_DISPLAY || null,
+    display: overlay.DISPLAY || null,
+    runtimeDir: overlay.XDG_RUNTIME_DIR || null,
+    xAuthority: overlay.XAUTHORITY || null,
+  };
+}
+
+function getLinuxClipboardToolCandidates(clipboardEnv = process.env) {
   if (process.platform === 'win32' || process.platform === 'darwin') return [];
   const preferred = [];
-  if (process.env.WAYLAND_DISPLAY) preferred.push('wl-copy');
-  if (process.env.DISPLAY) preferred.push('xclip');
+  if (clipboardEnv.WAYLAND_DISPLAY) preferred.push('wl-copy');
+  if (clipboardEnv.DISPLAY) preferred.push('xclip');
   return preferred;
 }
 
 function assertLinuxClipboardAvailable() {
-  const candidates = getLinuxClipboardToolCandidates();
+  const gui = getLinuxClipboardEnv();
+  const candidates = getLinuxClipboardToolCandidates(gui.env);
   const available = candidates.filter(isLinuxClipboardToolInstalled);
-  if (available.length > 0) return available;
-  if (!process.env.WAYLAND_DISPLAY && !process.env.DISPLAY) {
-    throw new Error('Linux image paste requires an active graphical session (WAYLAND_DISPLAY or DISPLAY).');
+  if (available.length > 0) {
+    return {
+      tools: available,
+      env: gui.env,
+      source: gui.source,
+      waylandDisplay: gui.waylandDisplay,
+      display: gui.display,
+      runtimeDir: gui.runtimeDir,
+      xAuthority: gui.xAuthority,
+    };
+  }
+  if (!gui.waylandDisplay && !gui.display) {
+    throw new Error('Linux image paste requires a graphical session. Could not detect WAYLAND_DISPLAY or DISPLAY (common in pm2/systemd). Set CLAUDE_REMOTE_DISPLAY or CLAUDE_REMOTE_WAYLAND_DISPLAY and retry.');
   }
   throw new Error('Linux image paste requires wl-copy or xclip on the server. Install a matching clipboard tool and try again.');
 }
 
-function spawnLinuxClipboardTool(tool, imageBuffer, type) {
+function formatLinuxClipboardEnvLog(info) {
+  if (!info) return '';
+  const parts = [];
+  if (info.waylandDisplay) parts.push(`WAYLAND_DISPLAY=${info.waylandDisplay}`);
+  if (info.display) parts.push(`DISPLAY=${info.display}`);
+  if (info.runtimeDir) parts.push(`XDG_RUNTIME_DIR=${info.runtimeDir}`);
+  if (info.xAuthority) parts.push(`XAUTHORITY=${info.xAuthority}`);
+  return parts.length ? ` env[${parts.join(', ')}]` : '';
+}
+
+function spawnLinuxClipboardTool(tool, imageBuffer, type, clipboardEnv) {
   return new Promise((resolve, reject) => {
     const args = tool === 'xclip'
       ? ['-quiet', '-selection', 'clipboard', '-t', type, '-i']
@@ -740,6 +941,7 @@ function spawnLinuxClipboardTool(tool, imageBuffer, type) {
     const child = spawn(tool, args, {
       detached: true,
       stdio: ['pipe', 'ignore', 'pipe'],
+      env: clipboardEnv || process.env,
     });
     let settled = false;
     let stderr = '';
@@ -803,16 +1005,17 @@ function spawnLinuxClipboardTool(tool, imageBuffer, type) {
   });
 }
 
-async function startLinuxClipboardImage(tmpFile, mediaType) {
+async function startLinuxClipboardImage(tmpFile, mediaType, clipboardInfo = null) {
   const type = String(mediaType || 'image/png').toLowerCase();
   const imageBuffer = fs.readFileSync(tmpFile);
-  const availableTools = assertLinuxClipboardAvailable();
+  const resolved = clipboardInfo || assertLinuxClipboardAvailable();
+  const availableTools = resolved.tools;
   clearActiveLinuxClipboardProc('replace');
 
   let lastErr = null;
   for (const tool of availableTools) {
     try {
-      return await spawnLinuxClipboardTool(tool, imageBuffer, type);
+      return await spawnLinuxClipboardTool(tool, imageBuffer, type, resolved.env);
     } catch (err) {
       lastErr = err;
       log(`Linux clipboard arm failed (${tool}): ${err.message}`);
@@ -1073,8 +1276,8 @@ wss.on('connection', (ws, req) => {
         cleanupImageUpload(uploadId);
         if (process.platform !== 'win32' && process.platform !== 'darwin') {
           try {
-            const tools = assertLinuxClipboardAvailable();
-            log(`Linux clipboard preflight OK: ${tools.join(', ')}`);
+            const clipboardInfo = assertLinuxClipboardAvailable();
+            log(`Linux clipboard preflight OK: ${clipboardInfo.tools.join(', ')} source=${clipboardInfo.source}${formatLinuxClipboardEnvLog(clipboardInfo)}`);
           } catch (err) {
             sendUploadStatus(ws, uploadId, 'error', { message: err.message });
             break;
@@ -1849,8 +2052,9 @@ async function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = 
     } else if (isMac) {
       execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as 芦class PNGf禄)'`, { timeout: 10000 });
     } else {
-      const tool = await startLinuxClipboardImage(tmpFile, mediaType);
-      log(`Linux clipboard armed with ${tool}`);
+      const clipboardInfo = assertLinuxClipboardAvailable();
+      const tool = await startLinuxClipboardImage(tmpFile, mediaType, clipboardInfo);
+      log(`Linux clipboard armed with ${tool} source=${clipboardInfo.source}${formatLinuxClipboardEnvLog(clipboardInfo)}`);
     }
     log('Clipboard set with image');
 
@@ -1924,8 +2128,8 @@ function handleImageUpload(msg) {
 
   try {
     if (process.platform !== 'win32' && process.platform !== 'darwin') {
-      const tools = assertLinuxClipboardAvailable();
-      log(`Linux clipboard preflight OK (legacy upload): ${tools.join(', ')}`);
+      const clipboardInfo = assertLinuxClipboardAvailable();
+      log(`Linux clipboard preflight OK (legacy upload): ${clipboardInfo.tools.join(', ')} source=${clipboardInfo.source}${formatLinuxClipboardEnvLog(clipboardInfo)}`);
     }
     const buf = Buffer.from(msg.base64, 'base64');
     tmpFile = createTempImageFile(buf, msg.mediaType, `legacy_${Date.now()}`);
