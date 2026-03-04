@@ -5,7 +5,7 @@ const os = require('os');
 const pty = require('node-pty');
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 
 // --- CLI argument parsing ---
 // Separate bridge args (CWD positional) from claude passthrough flags.
@@ -657,10 +657,6 @@ function createTempImageFile(buffer, mediaType, uploadId) {
   return tmpFile;
 }
 
-function shellQuote(value) {
-  return `'${String(value || '').replace(/'/g, `'\\''`)}'`;
-}
-
 function getLinuxClipboardTool() {
   if (process.platform === 'win32' || process.platform === 'darwin') return null;
   try {
@@ -686,6 +682,38 @@ function assertLinuxClipboardAvailable() {
   const tool = getLinuxClipboardTool();
   if (tool) return tool;
   throw new Error('Linux image paste requires xclip or wl-copy on the server. Install one and try again.');
+}
+
+function startLinuxClipboardImage(tmpFile, mediaType) {
+  const type = String(mediaType || 'image/png').toLowerCase();
+  const tool = assertLinuxClipboardAvailable();
+  const imageBuffer = fs.readFileSync(tmpFile);
+  const args = tool === 'xclip'
+    ? ['-selection', 'clipboard', '-t', type, '-i', '-loops', '1']
+    : ['--type', type, '--paste-once'];
+  const child = spawn(tool, args, {
+    detached: true,
+    stdio: ['pipe', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.on('error', (err) => {
+    log(`Linux clipboard process error (${tool}): ${err.message}`);
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString('utf8');
+    if (stderr.length > 2000) stderr = stderr.slice(-2000);
+  });
+  child.on('exit', (code, signal) => {
+    const extra = stderr.trim() ? ` stderr=${JSON.stringify(stderr.trim())}` : '';
+    log(`Linux clipboard process exited (${tool}) code=${code ?? 'null'} signal=${signal ?? 'null'}${extra}`);
+  });
+  child.stdin.on('error', (err) => {
+    if (err.code !== 'EPIPE') log(`Linux clipboard stdin error (${tool}): ${err.message}`);
+  });
+  child.stdin.end(imageBuffer);
+  child.unref();
+  log(`Linux clipboard process started (${tool}) pid=${child.pid ?? 'null'} type=${type} bytes=${imageBuffer.length}`);
+  return tool;
 }
 
 setInterval(() => {
@@ -1689,28 +1717,18 @@ function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', on
     } else if (isMac) {
       execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as 芦class PNGf禄)'`, { timeout: 10000 });
     } else {
-      const type = String(mediaType || 'image/png').toLowerCase();
-      const tool = assertLinuxClipboardAvailable();
-      const quotedPath = shellQuote(tmpFile);
-      const quotedType = shellQuote(type);
-      if (tool === 'xclip') {
-        execSync(`xclip -selection clipboard -t ${quotedType} -i < ${quotedPath}`, {
-          timeout: 10000,
-          shell: '/bin/sh',
-        });
-      } else {
-        execSync(`wl-copy --type ${quotedType} < ${quotedPath}`, {
-          timeout: 10000,
-          shell: '/bin/sh',
-        });
-      }
-      log(`Linux clipboard set with ${tool} (${type})`);
+      const tool = startLinuxClipboardImage(tmpFile, mediaType);
+      log(`Linux clipboard armed with ${tool}`);
     }
     log('Clipboard set with image');
 
-    if (isWin) claudeProc.write('\x1bv');
-    else claudeProc.write('\x16');
-    log('Sent image paste keypress to PTY');
+    const pasteDelayMs = isWin || isMac ? 0 : 150;
+    setTimeout(() => {
+      if (!claudeProc) return;
+      if (isWin) claudeProc.write('\x1bv');
+      else claudeProc.write('\x16');
+      log('Sent image paste keypress to PTY');
+    }, pasteDelayMs);
 
     setTimeout(() => {
       if (!claudeProc) return;
@@ -1728,7 +1746,7 @@ function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', on
           }
         }, 5000);
       }, 150);
-    }, 1000);
+    }, 1000 + pasteDelayMs);
   } catch (err) {
     log(`Image upload error: ${err.message}`);
     if (onCleanup) onCleanup();
