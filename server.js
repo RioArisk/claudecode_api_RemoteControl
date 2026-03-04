@@ -187,6 +187,8 @@ const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
 const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
 const LINUX_CLIPBOARD_READY_GRACE_MS = 400;
+const LINUX_AT_PROMPT_SUBMIT_DELAY_MS = 450;
+const LINUX_AT_IMAGE_CLEANUP_DELAY_MS = 10 * 60 * 1000;
 let turnStateVersion = 0;
 let turnState = {
   phase: 'idle',
@@ -2065,9 +2067,9 @@ async function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = 
             else {
               try { fs.unlinkSync(tmpFile); } catch {}
             }
-          }, 15000);
+          }, LINUX_AT_IMAGE_CLEANUP_DELAY_MS);
           resolve();
-        }, 100);
+        }, LINUX_AT_PROMPT_SUBMIT_DELAY_MS);
       });
       return;
     }
