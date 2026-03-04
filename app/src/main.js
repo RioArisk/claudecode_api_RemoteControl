@@ -2101,11 +2101,21 @@ function renderUser(evt) {
 // --- Interrupt Banner ---
 function renderInterruptBanner(evt) {
   closeGroup();
+  const wrapper = document.createElement('div');
+  wrapper.style.cssText = 'position:relative;display:flex;align-items:center;margin:12px 0;overflow:hidden;';
+  const line = document.createElement('div');
+  line.style.cssText = 'position:absolute;left:0;right:0;top:50%;height:1px;background:var(--border);';
+  wrapper.appendChild(line);
   const el = document.createElement('div');
-  el.className = 'interrupt-banner';
-  const label = evt.source === 'terminal' ? '终端中断' : '用户中断';
-  el.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="6" y="6" width="12" height="12" rx="1"/></svg><span>' + label + '</span>';
-  $msgs.appendChild(el);
+  const isTerminal = evt.source === 'terminal';
+  el.className = 'interrupt-banner' + (isTerminal ? ' terminal-interrupt' : ' user-interrupt');
+  const label = isTerminal ? '终端中断' : '用户中断';
+  const icon = isTerminal
+    ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 15l3-3-3-3"/><line x1="13" y1="15" x2="17" y2="15"/></svg>'
+    : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+  el.innerHTML = icon + '<span>' + label + '</span>';
+  wrapper.appendChild(el);
+  $msgs.appendChild(wrapper);
 }
 
 // --- Cost Card ---

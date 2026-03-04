@@ -850,11 +850,12 @@ header {
 }
 #btn-send:hover, #btn-send:active { background: var(--accent); color: #fff; }
 #btn-send.stop-mode {
-  background: var(--error); color: #fff; border-color: var(--error);
+  background: var(--bg); color: var(--text-muted); border-color: var(--border);
   opacity: 1; pointer-events: auto;
+  animation: pulse 1.5s infinite ease-in-out;
 }
 #btn-send.stop-mode:hover, #btn-send.stop-mode:active {
-  background: #c0392b; border-color: #c0392b;
+  background: var(--error-bg); color: var(--error); border-color: rgba(217,48,37,.3);
 }
 
 /* ===== Welcome ===== */
@@ -932,14 +933,16 @@ header {
 
 /* ===== Interrupt Banner ===== */
 .interrupt-banner {
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 8px 16px; margin: 8px 0;
-  background: rgba(231, 76, 60, 0.1);
-  border: 1px solid rgba(231, 76, 60, 0.3);
-  border-radius: 8px;
-  color: var(--error); font-size: 13px; font-weight: 500;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 6px 16px; width: fit-content;
+  background: var(--bg);
+  border-radius: 20px;
+  color: var(--text-muted); font-size: 12px; font-weight: 500;
   animation: fadeUp .2s ease;
+  position: relative; z-index: 1;
+  margin: 0 auto;
 }
+.interrupt-banner svg { opacity: .5; }
 
 /* ===== Input Disabled State ===== */
 #input-area.waiting .input-pill {

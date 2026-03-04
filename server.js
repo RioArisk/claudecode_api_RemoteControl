@@ -1396,11 +1396,20 @@ function extractSlashCommand(content) {
   return inlineMatch ? inlineMatch[1].trim().toLowerCase() : '';
 }
 
+function isUserInterruptEvent(content) {
+  const text = flattenUserContent(content)
+    .replace(/\x1B\[[0-9;]*m/g, '')
+    .trim();
+  if (!text) return false;
+  return /(?:^|\n)\[Request interrupted by user(?: for tool use)?\](?:\r?\n|$)/i.test(text);
+}
+
 function isNonAiUserEvent(event, content) {
   if (!event || typeof event !== 'object') return false;
   if (event.isMeta === true) return true;
   if (event.isCompactSummary === true) return true;
   if (event.isVisibleInTranscriptOnly === true) return true;
+  if (isUserInterruptEvent(content)) return true;
 
   const text = flattenUserContent(content).trim();
   if (!text) return false;
@@ -1554,12 +1563,16 @@ function startTailing() {
           if (event.type === 'user' || (event.message && event.message.role === 'user')) {
             const content = event.message && event.message.content;
             const slashCommand = extractSlashCommand(content);
+            const isInterruptedUserEvent = isUserInterruptEvent(content);
             const isPassiveUserEvent = isNonAiUserEvent(event, content);
             const ignoreInitialClear = (
               slashCommand === '/clear' &&
               pendingInitialClearTranscript &&
               pendingInitialClearTranscript.sessionId === currentSessionId
             );
+            if (!tailCatchingUp && isInterruptedUserEvent) {
+              setTurnState('idle', { sessionId: currentSessionId, reason: 'transcript_user_interrupt' });
+            }
             // Only live, AI-producing user messages can move the turn state
             // into running. Historical replay and slash commands are ignored.
             if (!tailCatchingUp && !slashCommand && !isPassiveUserEvent) {
