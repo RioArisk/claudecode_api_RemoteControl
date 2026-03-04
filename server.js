@@ -197,6 +197,7 @@ let turnState = {
 let ttyInputForwarderAttached = false;
 let ttyInputHandler = null;
 let ttyResizeHandler = null;
+let activeLinuxClipboardProc = null;
 
 // --- Permission approval state ---
 let approvalSeq = 0;
@@ -217,6 +218,18 @@ function log(msg) {
 function formatTtyInputChunk(chunk) {
   const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
   return `len=${buf.length} hex=${buf.toString('hex')} base64=${buf.toString('base64')} utf8=${JSON.stringify(buf.toString('utf8'))}`;
+}
+
+function clearActiveLinuxClipboardProc(reason = '') {
+  if (!activeLinuxClipboardProc) return;
+  const { child, tool } = activeLinuxClipboardProc;
+  activeLinuxClipboardProc = null;
+  try {
+    child.kill('SIGTERM');
+    log(`Linux clipboard process terminated (${tool}) reason=${reason || 'cleanup'}`);
+  } catch (err) {
+    log(`Linux clipboard process terminate error (${tool}): ${err.message}`);
+  }
 }
 
 function wsLabel(ws) {
@@ -688,13 +701,15 @@ function startLinuxClipboardImage(tmpFile, mediaType) {
   const type = String(mediaType || 'image/png').toLowerCase();
   const tool = assertLinuxClipboardAvailable();
   const imageBuffer = fs.readFileSync(tmpFile);
+  clearActiveLinuxClipboardProc('replace');
   const args = tool === 'xclip'
-    ? ['-selection', 'clipboard', '-t', type, '-i', '-loops', '1']
-    : ['--type', type, '--paste-once'];
+    ? ['-selection', 'clipboard', '-t', type, '-i']
+    : ['--type', type];
   const child = spawn(tool, args, {
     detached: true,
     stdio: ['pipe', 'ignore', 'pipe'],
   });
+  activeLinuxClipboardProc = { child, tool };
   let stderr = '';
   child.on('error', (err) => {
     log(`Linux clipboard process error (${tool}): ${err.message}`);
@@ -704,6 +719,7 @@ function startLinuxClipboardImage(tmpFile, mediaType) {
     if (stderr.length > 2000) stderr = stderr.slice(-2000);
   });
   child.on('exit', (code, signal) => {
+    if (activeLinuxClipboardProc && activeLinuxClipboardProc.child === child) activeLinuxClipboardProc = null;
     const extra = stderr.trim() ? ` stderr=${JSON.stringify(stderr.trim())}` : '';
     log(`Linux clipboard process exited (${tool}) code=${code ?? 'null'} signal=${signal ?? 'null'}${extra}`);
   });
@@ -1738,6 +1754,10 @@ function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = '', on
       setTimeout(() => {
         if (claudeProc) claudeProc.write('\r');
         log('Sent Enter after image paste' + (trimmedText ? ` + text: "${trimmedText.substring(0, 60)}"` : ''));
+
+        if (!isWin && !isMac) {
+          setTimeout(() => clearActiveLinuxClipboardProc('post-paste'), 1000);
+        }
 
         setTimeout(() => {
           if (onCleanup) onCleanup();
