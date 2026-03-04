@@ -163,6 +163,7 @@ const WS_CLOSE_AUTH_FAILED = 4001;
 const WS_CLOSE_AUTH_TIMEOUT = 4002;
 const WS_CLOSE_REASON_AUTH_FAILED = 'auth_failed';
 const WS_CLOSE_REASON_AUTH_TIMEOUT = 'auth_timeout';
+const DEBUG_TTY_INPUT = process.env.CLAUDE_REMOTE_DEBUG_TTY_INPUT === '1';
 
 // --- State ---
 let claudeProc = null;
@@ -211,6 +212,11 @@ fs.writeFileSync(LOG_FILE, `--- Bridge started ${new Date().toISOString()} ---\n
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
   fs.appendFileSync(LOG_FILE, line);
+}
+
+function formatTtyInputChunk(chunk) {
+  const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  return `len=${buf.length} hex=${buf.toString('hex')} base64=${buf.toString('base64')} utf8=${JSON.stringify(buf.toString('utf8'))}`;
 }
 
 function wsLabel(ws) {
@@ -276,6 +282,13 @@ function attachTtyForwarders() {
   if (!isTTY || ttyInputForwarderAttached) return;
 
   ttyInputHandler = (chunk) => {
+    if (DEBUG_TTY_INPUT) {
+      try {
+        log(`TTY input ${formatTtyInputChunk(chunk)}`);
+      } catch (err) {
+        log(`TTY input log error: ${err.message}`);
+      }
+    }
     if (claudeProc) claudeProc.write(chunk);
   };
   ttyResizeHandler = () => {
