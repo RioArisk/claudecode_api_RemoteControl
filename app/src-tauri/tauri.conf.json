@@ -1,6 +1,6 @@
 {
   "productName": "Claude Remote",
-  "version": "0.3.1",
+  "version": "0.4.5",
   "identifier": "com.clauderemote.app",
   "build": {
     "frontendDist": "../src"

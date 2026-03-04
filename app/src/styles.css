@@ -849,6 +849,13 @@ header {
   transition: all .15s; flex-shrink: 0; margin: 2px;
 }
 #btn-send:hover, #btn-send:active { background: var(--accent); color: #fff; }
+#btn-send.stop-mode {
+  background: var(--error); color: #fff; border-color: var(--error);
+  opacity: 1; pointer-events: auto;
+}
+#btn-send.stop-mode:hover, #btn-send.stop-mode:active {
+  background: #c0392b; border-color: #c0392b;
+}
 
 /* ===== Welcome ===== */
 .welcome {
@@ -923,6 +930,17 @@ header {
 }
 .elapsed-time svg { opacity: .6; }
 
+/* ===== Interrupt Banner ===== */
+.interrupt-banner {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 16px; margin: 8px 0;
+  background: rgba(231, 76, 60, 0.1);
+  border: 1px solid rgba(231, 76, 60, 0.3);
+  border-radius: 8px;
+  color: var(--error); font-size: 13px; font-weight: 500;
+  animation: fadeUp .2s ease;
+}
+
 /* ===== Input Disabled State ===== */
 #input-area.waiting .input-pill {
   border-color: var(--border);
@@ -954,10 +972,10 @@ header {
   color: var(--text-muted); pointer-events: none;
 }
 #input-area.waiting #btn-send {
-  opacity: .3; pointer-events: none;
-  background: var(--bg);
-  border-color: var(--border);
-  color: var(--text-muted);
+  /* Overridden by .stop-mode when waiting — keep button clickable */
+}
+#input-area.waiting #btn-send.stop-mode {
+  opacity: 1; pointer-events: auto;
 }
 #btn-send.empty {
   opacity: .35; pointer-events: none;

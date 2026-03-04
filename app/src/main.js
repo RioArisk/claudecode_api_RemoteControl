@@ -1384,10 +1384,11 @@ function setWaiting(on, reason = '') {
     S.waitStartedAt = 0;
   }
   $input.disabled = on;
-  $('btn-send').disabled = on;
   $input.placeholder = on ? INPUT_PLACEHOLDER_WAITING : INPUT_PLACEHOLDER_DEFAULT;
   $('input-area').classList.toggle('waiting', on);
+
   if (on) {
+    setSendButtonMode('stop');
     removeWorkingIndicator();
     const el = document.createElement('div');
     el.className = 'working-indicator';
@@ -1396,10 +1397,25 @@ function setWaiting(on, reason = '') {
     S.workingEl = el;
     scrollEnd();
   } else {
+    setSendButtonMode('send');
     showElapsedTime();
     removeWorkingIndicator();
   }
   updateSendBtn();
+}
+
+function setSendButtonMode(mode) {
+  const btn = $('btn-send');
+  btn.disabled = false;
+  if (mode === 'stop') {
+    btn.classList.add('stop-mode');
+    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+    btn.title = 'Stop';
+    return;
+  }
+  btn.classList.remove('stop-mode');
+  btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+  btn.title = 'Send';
 }
 
 function switchToWorking() {
@@ -1431,8 +1447,13 @@ function removeWorkingIndicator() {
 }
 
 function updateSendBtn() {
+  const btn = $('btn-send');
+  if (S.waiting) {
+    btn.classList.remove('empty');
+    return;
+  }
   const empty = !$input.value.trim() && !pendingImage;
-  $('btn-send').classList.toggle('empty', empty && !S.waiting);
+  btn.classList.toggle('empty', empty);
 }
 
 function syncConfirmedModel(nextModel, { allowToast = false } = {}) {
@@ -1528,12 +1549,19 @@ function clearConversationUi() {
   $msgs.innerHTML = getWelcomeMarkup();
   $('input-area').classList.remove('waiting');
   $input.disabled = false;
-  $('btn-send').disabled = false;
   $input.placeholder = INPUT_PLACEHOLDER_DEFAULT;
+  setSendButtonMode('send');
   updateSendBtn();
   updateScrollBtn();
   setConnBanner(false);
   $('perm-overlay').classList.remove('visible');
+}
+
+function finalizeOptimisticBubble() {
+  const opt = $msgs.querySelector('[data-optimistic]');
+  if (!opt) return false;
+  opt.removeAttribute('data-optimistic');
+  return true;
 }
 
 
@@ -1964,6 +1992,14 @@ function processEvent(evt, seq) {
       return;
     }
 
+    // Interrupt event — render red banner
+    if (evt.type === 'interrupt') {
+      finalizeOptimisticBubble();
+      renderInterruptBanner(evt);
+      scrollEnd();
+      return;
+    }
+
     if (evt.type === 'user' && evt.message) {
       const c = evt.message.content;
       if (typeof c === 'string' && isJunkContent(c)) return;
@@ -2016,8 +2052,7 @@ function renderUser(evt) {
     const textBlocks = c.filter(b => b && b.type === 'text' && b.text);
     if (imageBlocks.length > 0 || textBlocks.length > 0) {
       closeGroup();
-      const opt = $msgs.querySelector('[data-optimistic]');
-      if (opt) { opt.removeAttribute('data-optimistic'); return; }
+      if (finalizeOptimisticBubble()) return;
 
       const el = document.createElement('div');
       el.className = 'user-msg';
@@ -2054,14 +2089,23 @@ function renderUser(evt) {
     const cleaned = stripImageTags(c);
     if (cleaned.trim()) {
       closeGroup();
-      const opt = $msgs.querySelector('[data-optimistic]');
-      if (opt) { opt.removeAttribute('data-optimistic'); return; }
+      if (finalizeOptimisticBubble()) return;
       const el = document.createElement('div');
       el.className = 'user-msg';
       el.innerHTML = esc(cleaned).replace(/\n/g, '<br>');
       $msgs.appendChild(el);
     }
   }
+}
+
+// --- Interrupt Banner ---
+function renderInterruptBanner(evt) {
+  closeGroup();
+  const el = document.createElement('div');
+  el.className = 'interrupt-banner';
+  const label = evt.source === 'terminal' ? '终端中断' : '用户中断';
+  el.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="6" y="6" width="12" height="12" rx="1"/></svg><span>' + label + '</span>';
+  $msgs.appendChild(el);
 }
 
 // --- Cost Card ---
@@ -2719,9 +2763,16 @@ function resetAppState() {
 }
 
 function send() {
+  // While waiting, clicking send = interrupt
+  if (S.waiting) {
+    if (S.ws && S.ws.readyState === WebSocket.OPEN && S.authenticated) {
+      S.ws.send(JSON.stringify({ type: 'interrupt' }));
+    }
+    return;
+  }
   const t = $input.value.trim();
   const hasImage = !!pendingImage;
-  if ((!t && !hasImage) || !S.ws || S.ws.readyState !== WebSocket.OPEN || !S.authenticated || S.waiting) return;
+  if ((!t && !hasImage) || !S.ws || S.ws.readyState !== WebSocket.OPEN || !S.authenticated) return;
   debugLog('send_invoked', {
     hasImage,
     textPreview: t.slice(0, 80),

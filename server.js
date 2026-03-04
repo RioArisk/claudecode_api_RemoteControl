@@ -263,6 +263,7 @@ function getTurnStatePayload() {
     sessionId: turnState.sessionId,
     version: turnState.version,
     updatedAt: turnState.updatedAt,
+    reason: turnState.reason || '',
   };
 }
 
@@ -284,11 +285,28 @@ function setTurnState(phase, { sessionId = currentSessionId, reason = '', force 
     sessionId: normalizedSessionId,
     version: ++turnStateVersion,
     updatedAt: Date.now(),
+    reason,
   };
 
   log(`Turn state -> phase=${turnState.phase} session=${turnState.sessionId ?? 'null'} version=${turnState.version}${reason ? ` reason=${reason}` : ''}`);
   broadcast(getTurnStatePayload());
   return true;
+}
+
+function emitInterrupt(source) {
+  const interruptEvent = {
+    type: 'interrupt',
+    source,
+    timestamp: Date.now(),
+    uuid: crypto.randomUUID(),
+  };
+  const record = { seq: ++eventSeq, event: interruptEvent };
+  eventBuffer.push(record);
+  if (eventBuffer.length > EVENT_BUFFER_MAX) {
+    eventBuffer = eventBuffer.slice(-Math.round(EVENT_BUFFER_MAX * 0.8));
+  }
+  broadcast({ type: 'log_event', seq: record.seq, event: interruptEvent });
+  setTurnState('idle', { reason: `${source}_interrupt` });
 }
 
 function attachTtyForwarders() {
@@ -303,6 +321,12 @@ function attachTtyForwarders() {
       }
     }
     if (claudeProc) claudeProc.write(chunk);
+    // Detect Ctrl+C (0x03) from local terminal and sync state
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (buf.includes(0x03) && turnState.phase === 'running') {
+      log('Terminal Ctrl+C detected — injecting interrupt event');
+      emitInterrupt('terminal');
+    }
   };
   ttyResizeHandler = () => {
     if (claudeProc) claudeProc.resize(process.stdout.columns, process.stdout.rows);
@@ -899,6 +923,14 @@ wss.on('connection', (ws, req) => {
         // Raw terminal keystrokes from xterm.js in WebUI
         if (claudeProc) claudeProc.write(msg.data);
         break;
+      case 'interrupt': {
+        // User pressed stop button in app — send Ctrl+C to PTY
+        if (!claudeProc || turnState.phase !== 'running') break;
+        log(`Interrupt from ${wsLabel(ws)} — sending Ctrl+C to PTY`);
+        claudeProc.write('\x03');
+        emitInterrupt('app');
+        break;
+      }
       case 'expect_clear':
         // Plan mode option 1 triggers /clear inside Claude Code;
         // client notifies us so we can detect the session switch.
