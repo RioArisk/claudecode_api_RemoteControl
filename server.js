@@ -187,7 +187,6 @@ const isTTY = process.stdin.isTTY && process.stdout.isTTY;
 const LEGACY_REPLAY_DELAY_MS = 1500;
 const IMAGE_UPLOAD_TTL_MS = 15 * 60 * 1000;
 const LINUX_CLIPBOARD_READY_GRACE_MS = 400;
-const IMAGE_UPLOAD_DIR = path.join(CLAUDE_HOME, 'remote-uploads');
 let turnStateVersion = 0;
 let turnState = {
   phase: 'idle',
@@ -686,7 +685,7 @@ function cleanupClientUploads(ws) {
 function createTempImageFile(buffer, mediaType, uploadId) {
   const isLinux = process.platform !== 'win32' && process.platform !== 'darwin';
   const tmpDir = isLinux
-    ? IMAGE_UPLOAD_DIR
+    ? path.join(CWD, 'tmp')
     : (process.env.CLAUDE_CODE_TMPDIR || os.tmpdir());
   const type = String(mediaType || 'image/png').toLowerCase();
   const ext = type.includes('jpeg') || type.includes('jpg') ? '.jpg' : '.png';
@@ -694,6 +693,20 @@ function createTempImageFile(buffer, mediaType, uploadId) {
   const tmpFile = path.join(tmpDir, `bridge_upload_${uploadId}_${Date.now()}${ext}`);
   fs.writeFileSync(tmpFile, buffer);
   return tmpFile;
+}
+
+function toClaudeAtPath(filePath) {
+  const normalized = path.normalize(String(filePath || ''));
+  const rel = path.relative(CWD, normalized);
+  const inProject = rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  const target = inProject ? rel : normalized;
+  return target.split(path.sep).join('/');
+}
+
+function buildLinuxImagePrompt(text, tmpFile) {
+  const trimmedText = String(text || '').trim();
+  const atPath = `@${toClaudeAtPath(tmpFile)}`;
+  return trimmedText ? `${trimmedText} ${atPath}` : atPath;
 }
 
 function isLinuxClipboardToolInstalled(tool) {
@@ -1274,15 +1287,6 @@ wss.on('connection', (ws, req) => {
           break;
         }
         cleanupImageUpload(uploadId);
-        if (process.platform !== 'win32' && process.platform !== 'darwin') {
-          try {
-            const clipboardInfo = assertLinuxClipboardAvailable();
-            log(`Linux clipboard preflight OK: ${clipboardInfo.tools.join(', ')} source=${clipboardInfo.source}${formatLinuxClipboardEnvLog(clipboardInfo)}`);
-          } catch (err) {
-            sendUploadStatus(ws, uploadId, 'error', { message: err.message });
-            break;
-          }
-        }
         pendingImageUploads.set(uploadId, {
           id: uploadId,
           owner: ws,
@@ -2038,23 +2042,41 @@ async function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = 
   const isWin = process.platform === 'win32';
   const isMac = process.platform === 'darwin';
   const isLinux = !isWin && !isMac;
-  if (isLinux && linuxImagePasteInFlight) {
-    throw new Error('Another Linux image paste is still in progress. Please wait a moment and try again.');
-  }
   try {
     const stat = fs.statSync(tmpFile);
     log(`Image ready: ${logLabel || path.basename(tmpFile)} (${stat.size} bytes)`);
-    if (isLinux) setLinuxImagePasteInFlight(true, 'prepare_upload');
+    if (isLinux) {
+      const linuxPrompt = buildLinuxImagePrompt(text, tmpFile);
+      await new Promise((resolve, reject) => {
+        if (!claudeProc) {
+          reject(new Error('Claude stopped before Linux image submit'));
+          return;
+        }
+        claudeProc.write(linuxPrompt);
+        setTimeout(() => {
+          if (!claudeProc) {
+            reject(new Error('Claude stopped before Linux image submit'));
+            return;
+          }
+          claudeProc.write('\r');
+          log(`Sent Linux image prompt via @ref: "${linuxPrompt.substring(0, 120)}"`);
+          setTimeout(() => {
+            if (onCleanup) onCleanup();
+            else {
+              try { fs.unlinkSync(tmpFile); } catch {}
+            }
+          }, 15000);
+          resolve();
+        }, 100);
+      });
+      return;
+    }
 
     if (isWin) {
       const psCmd = `Add-Type -AssemblyName System.Drawing; Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${tmpFile.replace(/'/g, "''")}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose()`;
       execSync(`powershell -NoProfile -STA -Command "${psCmd}"`, { timeout: 10000 });
     } else if (isMac) {
       execSync(`osascript -e 'set the clipboard to (read POSIX file "${tmpFile}" as 芦class PNGf禄)'`, { timeout: 10000 });
-    } else {
-      const clipboardInfo = assertLinuxClipboardAvailable();
-      const tool = await startLinuxClipboardImage(tmpFile, mediaType, clipboardInfo);
-      log(`Linux clipboard armed with ${tool} source=${clipboardInfo.source}${formatLinuxClipboardEnvLog(clipboardInfo)}`);
     }
     log('Clipboard set with image');
 
@@ -2085,12 +2107,7 @@ async function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = 
             claudeProc.write('\r');
             log('Sent Enter after image paste' + (trimmedText ? ` + text: "${trimmedText.substring(0, 60)}"` : ''));
 
-            if (isLinux) {
-              setTimeout(() => clearActiveLinuxClipboardProc('post-paste'), 1000);
-            }
-
             setTimeout(() => {
-              if (isLinux) setLinuxImagePasteInFlight(false, 'cleanup');
               if (onCleanup) onCleanup();
               else {
                 try { fs.unlinkSync(tmpFile); } catch {}
@@ -2103,10 +2120,6 @@ async function handlePreparedImageUpload({ tmpFile, mediaType, text, logLabel = 
     });
   } catch (err) {
     log(`Image upload error: ${err.message}`);
-    if (isLinux) {
-      clearActiveLinuxClipboardProc('error');
-      setLinuxImagePasteInFlight(false, 'error');
-    }
     if (onCleanup) onCleanup();
     else {
       try { fs.unlinkSync(tmpFile); } catch {}
@@ -2127,10 +2140,6 @@ function handleImageUpload(msg) {
   let tmpFile = null;
 
   try {
-    if (process.platform !== 'win32' && process.platform !== 'darwin') {
-      const clipboardInfo = assertLinuxClipboardAvailable();
-      log(`Linux clipboard preflight OK (legacy upload): ${clipboardInfo.tools.join(', ')} source=${clipboardInfo.source}${formatLinuxClipboardEnvLog(clipboardInfo)}`);
-    }
     const buf = Buffer.from(msg.base64, 'base64');
     tmpFile = createTempImageFile(buf, msg.mediaType, `legacy_${Date.now()}`);
     log(`Image saved: ${tmpFile} (${buf.length} bytes)`);
