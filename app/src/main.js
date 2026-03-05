@@ -650,7 +650,7 @@ function saveServerDialog() {
   renderHubCards();
 }
 
-function deleteServerFromDialog() {
+async function deleteServerFromDialog() {
   if (!hubEditingServerId) return;
   const id = hubEditingServerId;
   const servers = getSavedServers();
@@ -661,48 +661,37 @@ function deleteServerFromDialog() {
     (!!serverCacheAddr && target.cacheAddr === serverCacheAddr)
   );
   const deletingConnecting = hubConnectingServerId === id;
-  // Use the existing confirm overlay
-  $('confirm-text').textContent = 'Delete this server?';
-  $('confirm-overlay').classList.add('visible');
-  const onOk = () => {
-    const removed = removeServer(id);
-    hubStatus.delete(id);
-    clearHubRetry(id);
-    if (deletingConnecting) {
-      hubConnectingServerId = null;
-      hideHubConnectOverlay();
-    }
-    if (deletingCurrent || deletingConnecting || (removed && removed.wsUrl === serverWsUrl)) {
-      if (S.reconnectTimer) { clearTimeout(S.reconnectTimer); S.reconnectTimer = null; }
-      const hadWs = !!S.ws;
-      S.intentionalDisconnect = hadWs;
-      S.skipNextCloseHandling = hadWs;
-      if (S.ws) {
-        try { S.ws.close(); } catch {}
-      } else {
-        S.intentionalDisconnect = false;
-        S.skipNextCloseHandling = false;
-      }
-      serverAddr = '';
-      serverWsUrl = '';
-      serverCacheAddr = '';
-      serverToken = '';
-      localStorage.removeItem(LAST_KEY);
-      resetAppState();
-      showConnectScreen();
-    }
-    closeServerDialog();
-    renderHubCards();
-    cleanup();
-  };
-  const onCancel = () => { cleanup(); };
-  function cleanup() {
-    $('confirm-ok').removeEventListener('click', onOk);
-    $('confirm-cancel').removeEventListener('click', onCancel);
-    $('confirm-overlay').classList.remove('visible');
+  // Close the edit dialog first so the confirm dialog is clearly visible
+  closeServerDialog();
+  const ok = await showConfirm('Delete this server?');
+  if (!ok) { renderHubCards(); return; }
+  const removed = removeServer(id);
+  hubStatus.delete(id);
+  clearHubRetry(id);
+  if (deletingConnecting) {
+    hubConnectingServerId = null;
+    hideHubConnectOverlay();
   }
-  $('confirm-ok').addEventListener('click', onOk);
-  $('confirm-cancel').addEventListener('click', onCancel);
+  if (deletingCurrent || deletingConnecting || (removed && removed.wsUrl === serverWsUrl)) {
+    if (S.reconnectTimer) { clearTimeout(S.reconnectTimer); S.reconnectTimer = null; }
+    const hadWs = !!S.ws;
+    S.intentionalDisconnect = hadWs;
+    S.skipNextCloseHandling = hadWs;
+    if (S.ws) {
+      try { S.ws.close(); } catch {}
+    } else {
+      S.intentionalDisconnect = false;
+      S.skipNextCloseHandling = false;
+    }
+    serverAddr = '';
+    serverWsUrl = '';
+    serverCacheAddr = '';
+    serverToken = '';
+    localStorage.removeItem(LAST_KEY);
+    resetAppState();
+    showConnectScreen();
+  }
+  renderHubCards();
 }
 
 // ---- Migrate on load ----
