@@ -17,7 +17,7 @@ import {
 import { serverAddr } from './state.js';
 import { processEvent, syncConfirmedModel, updateHeaderInfo, cacheTurnState, applyTurnState, clearConversationUi, restoreSessionCache, hasOptimisticBubble, rebuildRuntimeStateFromDom, scheduleSessionCacheSave, flushSessionCacheSave } from './renderer.js';
 import { setWaiting } from './waiting.js';
-import { showPermission } from './permissions.js';
+import { showPermission, dismissPermissionById, clearPermissions } from './permissions.js';
 import { handleUploadStatus, updateImagePreviewUi } from './image-upload.js';
 import { renderSessionList } from './sessions.js';
 import { renderDirBrowser, updateSettingsCwd } from './dir-picker.js';
@@ -376,10 +376,8 @@ export function connect() {
       }
       else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false, 'pty_exit'); }
       else if (m.type === 'permission_request') showPermission(m);
-      else if (m.type === 'clear_permissions') {
-        S.pendingPerms = [];
-        $('perm-overlay').classList.remove('visible');
-      }
+      else if (m.type === 'permission_resolved') dismissPermissionById(m.id);
+      else if (m.type === 'clear_permissions') clearPermissions();
       else if (m.type === 'sessions') {
         renderSessionList(m.sessions || []);
         updateSettingsCwd();

@@ -21,6 +21,8 @@ function permToolDetail(name, input) {
 }
 
 export function showPermission(m) {
+  if (!m || !m.id) return;
+  if (S.pendingPerms.some(item => item.id === m.id)) return;
   S.pendingPerms.push({ id: m.id, toolName: m.toolName, toolInput: m.toolInput });
   if (S.pendingPerms.length === 1) showNextPerm();
   else updatePermCounter();
@@ -54,7 +56,7 @@ function updatePermCounter() {
 }
 
 function resolvePermission(decision) {
-  if (S.pendingPerms.length === 0 || !S.ws) return;
+  if (S.pendingPerms.length === 0 || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
   const p = S.pendingPerms.shift();
   S.ws.send(JSON.stringify({
     type: 'permission_response',
@@ -62,6 +64,28 @@ function resolvePermission(decision) {
     decision,
   }));
   showNextPerm();
+}
+
+export function dismissPermissionById(id) {
+  const permId = typeof id === 'string' ? id : '';
+  if (!permId) return;
+  const idx = S.pendingPerms.findIndex(item => item.id === permId);
+  if (idx === -1) return;
+  const wasCurrent = idx === 0;
+  S.pendingPerms.splice(idx, 1);
+  if (S.pendingPerms.length === 0) {
+    $('perm-overlay').classList.remove('visible');
+    updatePermCounter();
+    return;
+  }
+  if (wasCurrent) showNextPerm();
+  else updatePermCounter();
+}
+
+export function clearPermissions() {
+  S.pendingPerms = [];
+  $('perm-overlay').classList.remove('visible');
+  updatePermCounter();
 }
 
 export function initPermissions() {
