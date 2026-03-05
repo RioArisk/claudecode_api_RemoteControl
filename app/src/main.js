@@ -1571,11 +1571,7 @@ function clearConversationUi() {
   S.lastSeq = 0;
   S.pendingPerms = [];
   S.pendingPlanContent = '';
-  questionQueue = [];
-  currentQuestions = null;
-  currentQuestionIdx = 0;
-  $('question-overlay').classList.remove('visible');
-  $('plan-overlay').classList.remove('visible');
+  resetInteractionState();
   resetTodoState();
   clearPendingImage({ abortUpload: false });
   $msgs.innerHTML = getWelcomeMarkup();
@@ -2111,6 +2107,7 @@ function renderUser(evt) {
     }
     for (const b of c) {
       if (b.type === 'tool_result') {
+        resolveInteractiveToolResult(b);
         handleTodoToolResult(b, evt);
         attachResult(b);
       }
@@ -2278,6 +2275,86 @@ function renderCompactSummary(evt) {
 }
 
 const HIDDEN_STEP_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'AskUserQuestion', 'ExitPlanMode']);
+let pendingInteractions = new Map(); // toolUseId -> { toolUseId, kind: 'question'|'plan', payload }
+let pendingInteractionOrder = [];    // ordered toolUseIds for deterministic replay recovery
+
+function enqueuePendingInteraction(toolUseId, kind, payload) {
+  if (!toolUseId) return;
+  if (!pendingInteractions.has(toolUseId)) pendingInteractionOrder.push(toolUseId);
+  pendingInteractions.set(toolUseId, { toolUseId, kind, payload });
+}
+
+function dropPendingInteraction(toolUseId) {
+  if (!toolUseId || !pendingInteractions.has(toolUseId)) return false;
+  pendingInteractions.delete(toolUseId);
+  pendingInteractionOrder = pendingInteractionOrder.filter(id => id !== toolUseId);
+  return true;
+}
+
+function getNextPendingInteraction() {
+  while (pendingInteractionOrder.length > 0) {
+    const toolUseId = pendingInteractionOrder[0];
+    const interaction = pendingInteractions.get(toolUseId);
+    if (interaction) return interaction;
+    pendingInteractionOrder.shift();
+  }
+  return null;
+}
+
+function hasActiveInteractionUi() {
+  return !!currentQuestionItem || !!activePlanToolUseId ||
+    $('question-overlay').classList.contains('visible') ||
+    $('plan-overlay').classList.contains('visible');
+}
+
+function presentNextPendingInteraction() {
+  if (S.replaying || hasActiveInteractionUi()) return;
+  const next = getNextPendingInteraction();
+  if (!next) return;
+  if (next.kind === 'question') {
+    showQuestion(next.payload, { toolUseId: next.toolUseId });
+  } else if (next.kind === 'plan') {
+    showPlanApproval(next.payload, { toolUseId: next.toolUseId });
+  }
+}
+
+function registerInteractiveToolUse(block) {
+  const toolName = block.name || '';
+  if (toolName === 'AskUserQuestion' && block.input && block.input.questions) {
+    if (block.id) {
+      enqueuePendingInteraction(block.id, 'question', block.input.questions);
+      presentNextPendingInteraction();
+    } else if (!S.replaying) {
+      showQuestion(block.input.questions);
+    }
+    return true;
+  }
+  if (toolName === 'ExitPlanMode') {
+    if (S.replaying) {
+      const plan = normalizePlanContent(block.input?.plan || '');
+      if (plan) renderPlanCard(plan);
+    }
+    if (block.id) {
+      enqueuePendingInteraction(block.id, 'plan', block.input || {});
+      presentNextPendingInteraction();
+    } else if (!S.replaying) {
+      showPlanApproval(block.input);
+    }
+    return true;
+  }
+  return false;
+}
+
+function resolveInteractiveToolResult(block) {
+  const toolUseId = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
+  if (!toolUseId) return;
+  const interaction = pendingInteractions.get(toolUseId);
+  if (!interaction) return;
+  dropPendingInteraction(toolUseId);
+  if (interaction.kind === 'question') dismissQuestionInteraction(toolUseId);
+  if (interaction.kind === 'plan') dismissPlanInteraction(toolUseId);
+  presentNextPendingInteraction();
+}
 
 // --- Assistant ---
 function renderAssistant(evt) {
@@ -2297,15 +2374,8 @@ function renderAssistant(evt) {
         if (isTodoTool(toolName)) {
           handleTodoToolUse(b);
         }
-        if (toolName === 'AskUserQuestion' && b.input && b.input.questions) {
-          if (!S.replaying) showQuestion(b.input.questions);
-        } else if (toolName === 'ExitPlanMode') {
-          if (S.replaying) {
-            const plan = normalizePlanContent(b.input?.plan || '');
-            if (plan) renderPlanCard(plan);
-          } else {
-            showPlanApproval(b.input);
-          }
+        if (registerInteractiveToolUse(b)) {
+          // handled by interaction state machine
         } else if (!HIDDEN_STEP_TOOLS.has(toolName)) {
           renderTool(b);
         }
@@ -2998,6 +3068,7 @@ function connect() {
         if (Number.isInteger(m.lastSeq) && m.lastSeq > S.lastSeq) S.lastSeq = m.lastSeq;
         S.replaying = false;
         if (S.pendingTurnState) applyTurnState(S.pendingTurnState, 'replay_done');
+        presentNextPendingInteraction();
         scheduleSessionCacheSave();
       }
       else if (m.type === 'status') {
@@ -3195,33 +3266,79 @@ $('perm-deny').addEventListener('click', () => resolvePermission('deny'));
 // ============================================================
 //  AskUserQuestion — interactive question overlay
 // ============================================================
-let questionQueue = [];
-let currentQuestions = null;
+let questionQueue = []; // [{ toolUseId, questions }]
+let currentQuestionItem = null;
 let currentQuestionIdx = 0;
+let activePlanToolUseId = null;
 
-function showQuestion(questions) {
-  questionQueue.push(questions);
-  if (questionQueue.length === 1) showNextQuestion();
+function resetInteractionState() {
+  pendingInteractions.clear();
+  pendingInteractionOrder = [];
+  questionQueue = [];
+  currentQuestionItem = null;
+  currentQuestionIdx = 0;
+  activePlanToolUseId = null;
+  $('question-overlay').classList.remove('visible');
+  $('plan-overlay').classList.remove('visible');
+}
+
+function showQuestion(questions, { toolUseId = '' } = {}) {
+  if (!Array.isArray(questions) || questions.length === 0) return;
+  if (toolUseId) {
+    if (currentQuestionItem?.toolUseId === toolUseId) return;
+    if (questionQueue.some(item => item.toolUseId === toolUseId)) return;
+  }
+  questionQueue.push({ toolUseId, questions });
+  if (!currentQuestionItem) showNextQuestion();
 }
 
 function showNextQuestion() {
   if (questionQueue.length === 0) {
     $('question-overlay').classList.remove('visible');
-    currentQuestions = null;
+    currentQuestionItem = null;
     return;
   }
-  currentQuestions = questionQueue[0];
+  currentQuestionItem = questionQueue[0];
   currentQuestionIdx = 0;
   renderCurrentQuestion();
 }
 
+function finishCurrentQuestionItem(nextDelayMs = 0) {
+  const finishedToolUseId = currentQuestionItem?.toolUseId || '';
+  if (questionQueue.length > 0) questionQueue.shift();
+  currentQuestionItem = null;
+  currentQuestionIdx = 0;
+  if (finishedToolUseId) dropPendingInteraction(finishedToolUseId);
+  if (questionQueue.length > 0) {
+    setTimeout(showNextQuestion, nextDelayMs);
+  } else {
+    presentNextPendingInteraction();
+  }
+}
+
+function dismissQuestionInteraction(toolUseId) {
+  if (!toolUseId) return;
+  const wasCurrent = currentQuestionItem?.toolUseId === toolUseId;
+  questionQueue = questionQueue.filter(item => item.toolUseId !== toolUseId);
+  if (wasCurrent) {
+    currentQuestionItem = null;
+    currentQuestionIdx = 0;
+    $('question-overlay').classList.remove('visible');
+    if (questionQueue.length > 0) {
+      setTimeout(showNextQuestion, 0);
+    } else {
+      presentNextPendingInteraction();
+    }
+  }
+}
+
 function renderCurrentQuestion() {
-  if (!currentQuestions || currentQuestionIdx >= currentQuestions.length) {
-    questionQueue.shift();
-    showNextQuestion();
+  if (!currentQuestionItem) return;
+  if (currentQuestionIdx >= currentQuestionItem.questions.length) {
+    finishCurrentQuestionItem();
     return;
   }
-  const q = currentQuestions[currentQuestionIdx];
+  const q = currentQuestionItem.questions[currentQuestionIdx];
   $('question-header-text').textContent = q.header || 'Question';
   $('question-text').textContent = q.question || '';
 
@@ -3253,19 +3370,17 @@ function sendQuestionAnswer(numKey) {
   S.ws.send(JSON.stringify({ type: 'input', data: String(numKey) }));
   $('question-overlay').classList.remove('visible');
   currentQuestionIdx++;
-  if (currentQuestions && currentQuestionIdx < currentQuestions.length) {
+  if (currentQuestionItem && currentQuestionIdx < currentQuestionItem.questions.length) {
     setTimeout(renderCurrentQuestion, 500);
   } else {
-    questionQueue.shift();
-    if (questionQueue.length > 0) setTimeout(showNextQuestion, 500);
-    else currentQuestions = null;
+    finishCurrentQuestionItem(500);
   }
 }
 
 function sendQuestionOther() {
   const text = $('question-other-input').value.trim();
   if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
-  const options = currentQuestions?.[currentQuestionIdx]?.options || [];
+  const options = currentQuestionItem?.questions?.[currentQuestionIdx]?.options || [];
   const otherNum = String(options.length + 1);
   S.ws.send(JSON.stringify({ type: 'input', data: otherNum }));
   setTimeout(() => {
@@ -3275,12 +3390,10 @@ function sendQuestionOther() {
   }, 500);
   $('question-overlay').classList.remove('visible');
   currentQuestionIdx++;
-  if (currentQuestions && currentQuestionIdx < currentQuestions.length) {
+  if (currentQuestionItem && currentQuestionIdx < currentQuestionItem.questions.length) {
     setTimeout(renderCurrentQuestion, 1000);
   } else {
-    questionQueue.shift();
-    if (questionQueue.length > 0) setTimeout(showNextQuestion, 1000);
-    else currentQuestions = null;
+    finishCurrentQuestionItem(1000);
   }
 }
 
@@ -3298,7 +3411,17 @@ const PLAN_OPTIONS = [
   { num: '3', label: 'Yes, manually approve edits', desc: 'Review each edit' },
 ];
 
-function showPlanApproval(input) {
+function dismissPlanInteraction(toolUseId) {
+  if (!toolUseId) return;
+  if (activePlanToolUseId !== toolUseId) return;
+  activePlanToolUseId = null;
+  $('plan-overlay').classList.remove('visible');
+  presentNextPendingInteraction();
+}
+
+function showPlanApproval(input, { toolUseId = '' } = {}) {
+  if (toolUseId && activePlanToolUseId === toolUseId && $('plan-overlay').classList.contains('visible')) return;
+  activePlanToolUseId = toolUseId || activePlanToolUseId || null;
   const plan = normalizePlanContent(input?.plan || '');
   S.pendingPlanContent = plan;
   const contentEl = $('plan-content');
@@ -3329,8 +3452,11 @@ function showPlanApproval(input) {
       } else {
         consumePendingPlanCard();
       }
+      if (activePlanToolUseId) dropPendingInteraction(activePlanToolUseId);
+      activePlanToolUseId = null;
       S.ws.send(JSON.stringify({ type: 'input', data: btn.dataset.num }));
       $('plan-overlay').classList.remove('visible');
+      presentNextPendingInteraction();
     });
   });
 
@@ -3342,6 +3468,8 @@ function sendPlanOther() {
   const text = $('plan-other-input').value.trim();
   if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
   consumePendingPlanCard();
+  if (activePlanToolUseId) dropPendingInteraction(activePlanToolUseId);
+  activePlanToolUseId = null;
   S.ws.send(JSON.stringify({ type: 'input', data: '4' }));
   setTimeout(() => {
     if (S.ws?.readyState === WebSocket.OPEN) {
@@ -3349,6 +3477,7 @@ function sendPlanOther() {
     }
   }, 500);
   $('plan-overlay').classList.remove('visible');
+  presentNextPendingInteraction();
 }
 
 $('plan-other-btn').addEventListener('click', sendPlanOther);
