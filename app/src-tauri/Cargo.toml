@@ -1,6 +1,6 @@
 [package]
 name = "claude-remote"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 
 [lib]
@@ -14,3 +14,4 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+

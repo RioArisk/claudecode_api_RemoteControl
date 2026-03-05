@@ -49,6 +49,7 @@ function toolDesc(name, input) {
     case 'WebFetch': return input.url || '';
     case 'WebSearch': return input.query || '';
     case 'Task': return input.description || input.prompt || '';
+    case 'Skill': return input.name || input.skill || input.skill_name || 'skill';
     default: return JSON.stringify(input).substring(0, 80);
   }
 }
@@ -69,6 +70,18 @@ function toolInputFull(name, input) {
     case 'WebFetch': return `${input.url}\n${input.prompt || ''}`;
     case 'WebSearch': return input.query || '';
     case 'Task': return `[${input.subagent_type || 'agent'}] ${input.description || ''}\n${trunc(input.prompt, 300)}`;
+    case 'Skill': {
+      const tags = [];
+      if (input.name) tags.push(`name: ${input.name}`);
+      if (input.skill) tags.push(`skill: ${input.skill}`);
+      if (input.skill_name) tags.push(`skill_name: ${input.skill_name}`);
+      if (input.id) tags.push(`id: ${input.id}`);
+      let argsSummary = '';
+      if (typeof input.args === 'string') argsSummary = `args: <hidden ${input.args.length} chars>`;
+      else if (input.args && typeof input.args === 'object') argsSummary = `args keys: ${Object.keys(input.args).join(', ')}`;
+      else if (input.args !== undefined) argsSummary = `args: <${typeof input.args}>`;
+      return [tags.join('\n'), argsSummary].filter(Boolean).join('\n') || 'Skill input hidden';
+    }
     default: return JSON.stringify(input, null, 2);
   }
 }
@@ -538,6 +551,16 @@ export function processEvent(evt, seq) {
 function renderUser(evt) {
   const c = evt.message.content;
   if (Array.isArray(c)) {
+    const toolResultBlocks = c.filter(b => b && b.type === 'tool_result');
+    if (toolResultBlocks.length > 0) {
+      for (const b of toolResultBlocks) {
+        resolveInteractiveToolResult(b);
+        handleTodoToolResult(b, evt);
+        attachResult(b);
+      }
+      return;
+    }
+
     const imageBlocks = c.filter(b => b && b.type === 'image');
     const textBlocks = c.filter(b => b && b.type === 'text' && b.text);
     if (imageBlocks.length > 0 || textBlocks.length > 0) {
@@ -566,13 +589,6 @@ function renderUser(evt) {
         $msgs.appendChild(el);
       }
       return;
-    }
-    for (const b of c) {
-      if (b.type === 'tool_result') {
-        resolveInteractiveToolResult(b);
-        handleTodoToolResult(b, evt);
-        attachResult(b);
-      }
     }
     return;
   }

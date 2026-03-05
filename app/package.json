@@ -1,6 +1,6 @@
 {
   "name": "claude-remote-android",
-  "version": "0.4.6",
+  "version": "0.5.1",
   "private": true,
   "scripts": {
     "tauri": "tauri",
