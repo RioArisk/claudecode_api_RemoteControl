@@ -561,6 +561,25 @@ function renderUser(evt) {
       return;
     }
 
+    // Some tool protocols (for example Skill expansion) emit meta text in a
+    // user-role event tied to a prior tool_use. Route that text into the tool
+    // detail panel instead of rendering it as a user chat bubble.
+    const sourceToolUseId = typeof evt.sourceToolUseID === 'string'
+      ? evt.sourceToolUseID
+      : (typeof evt.sourceToolUseId === 'string' ? evt.sourceToolUseId : '');
+    if (evt.isMeta === true && sourceToolUseId) {
+      const metaText = c
+        .filter(b => b && b.type === 'text' && typeof b.text === 'string')
+        .map(b => stripImageTags(b.text))
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+      if (metaText) {
+        attachResult({ tool_use_id: sourceToolUseId, content: metaText });
+      }
+      return;
+    }
+
     const imageBlocks = c.filter(b => b && b.type === 'image');
     const textBlocks = c.filter(b => b && b.type === 'text' && b.text);
     if (imageBlocks.length > 0 || textBlocks.length > 0) {
