@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Claude Remote</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ===== Hub Screen ===== -->
+<div id="connect-screen">
+  <div class="hub-header">
+    <div class="hub-header-left">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="hub-logo-icon">
+        <circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/>
+      </svg>
+      <span class="hub-header-title">Claude Remote</span>
+    </div>
+    <button class="hub-add-btn" id="hub-add-btn" title="Add server">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
+  <div class="hub-body" id="hub-body">
+    <div class="hub-empty" id="hub-empty">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+      <p>No servers yet</p>
+      <p class="hub-empty-sub">Tap + to add a server</p>
+    </div>
+    <div class="hub-section" id="hub-section-online" style="display:none">
+      <div class="hub-section-header">Online</div>
+      <div class="hub-card-list" id="hub-list-online"></div>
+    </div>
+    <div class="hub-section" id="hub-section-offline" style="display:none">
+      <div class="hub-section-header">Offline</div>
+      <div class="hub-card-list" id="hub-list-offline"></div>
+    </div>
+  </div>
+
+  <div id="hub-connect-overlay">
+    <div class="hub-connect-card">
+      <div class="hub-connect-spinner"></div>
+      <div class="hub-connect-title">Connecting...</div>
+      <div class="hub-connect-sub" id="hub-connect-sub">Preparing server session</div>
+    </div>
+  </div>
+
+  <!-- Add/Edit Server Dialog -->
+  <div id="hub-add-overlay">
+    <div id="hub-add-dialog">
+      <div class="hub-dialog-title" id="hub-dialog-title">Add Server</div>
+      <label class="hub-dialog-label">Server Address</label>
+      <input id="hub-dialog-addr" type="text" placeholder="192.168.1.100:3100 or wss://example.com"
+             inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="hub-dialog-label">Alias (optional)</label>
+      <input id="hub-dialog-alias" type="text" placeholder="e.g. Home Server"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label class="hub-dialog-label">Token (optional)</label>
+      <div class="hub-dialog-token-row">
+        <input id="hub-dialog-token" type="password" placeholder="Auth token"
+               autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button type="button" class="hub-dialog-token-toggle" id="hub-dialog-token-toggle" title="Show/hide token">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+      <div class="hub-dialog-error" id="hub-dialog-error"></div>
+      <div class="hub-dialog-actions">
+        <button class="hub-dialog-btn cancel" id="hub-dialog-cancel">Cancel</button>
+        <button class="hub-dialog-btn delete" id="hub-dialog-delete" style="display:none">Delete</button>
+        <button class="hub-dialog-btn save" id="hub-dialog-save">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<!-- ===== Main App ===== -->
+<div id="app" class="hidden">
+  <div id="conn-banner"><span class="banner-dot"></span><span id="conn-text">Disconnected</span></div>
+
+  <header>
+    <div class="header-left">
+      <button class="hbtn" id="btn-back" title="Disconnect">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+      </button>
+      <span class="status-dot starting" id="status-dot"></span>
+      <div class="header-info">
+        <h1 id="title">Claude Remote</h1>
+        <span class="header-meta" id="header-meta">
+          <span id="header-model"></span>
+        </span>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="hbtn" id="btn-settings" title="设置">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      </button>
+      <button class="hbtn" id="btn-sessions" title="Sessions">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="chat-area">
+    <div id="messages">
+      <div class="welcome" id="welcome">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+        <h2>Claude Remote Control</h2>
+        <p>Connected. Send a message below to start.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Todo Panel (above input, extends from chat box) -->
+  <div id="todo-panel">
+    <div id="todo-header" onclick="toggleTodoPanel()">
+      <div class="todo-header-left">
+        <svg class="todo-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>
+        <span class="todo-title">Tasks</span>
+        <span class="todo-badge" id="todo-badge">0</span>
+      </div>
+      <div class="todo-progress-mini" id="todo-progress-mini">
+        <div class="todo-progress-bar" id="todo-progress-bar"></div>
+      </div>
+      <span class="todo-summary" id="todo-summary"></span>
+    </div>
+    <div id="todo-list"></div>
+  </div>
+
+  <div id="input-area">
+    <div id="cmd-menu"></div>
+    <div id="image-preview" class="hidden">
+      <div id="image-preview-inner">
+        <img id="image-preview-img">
+        <div id="image-upload-overlay" class="hidden">
+          <div class="upload-ring-wrap">
+            <svg viewBox="0 0 36 36" class="upload-ring">
+              <path class="upload-ring-track" d="M18 2.5a15.5 15.5 0 1 1 0 31a15.5 15.5 0 1 1 0-31"/>
+              <path id="image-upload-ring" class="upload-ring-progress" d="M18 2.5a15.5 15.5 0 1 1 0 31a15.5 15.5 0 1 1 0-31"/>
+            </svg>
+            <span id="image-upload-text">0%</span>
+          </div>
+        </div>
+        <button id="image-preview-remove" title="Remove">&times;</button>
+      </div>
+    </div>
+    <div id="input-row">
+      <div class="input-pill">
+        <textarea id="input" placeholder="Reply..." rows="1"></textarea>
+        <button id="btn-image" class="pill-icon-btn" title="Upload image">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        </button>
+        <button id="btn-send" title="Send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </div>
+      <input type="file" id="image-file-input" accept="image/*" style="display:none">
+      <button id="btn-scroll" title="Scroll to bottom">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Model Picker -->
+  <div id="model-picker">
+    <div id="model-dialog">
+      <div class="model-title">Switch Model</div>
+      <div id="model-list"></div>
+    </div>
+  </div>
+
+  <!-- Permission Overlay -->
+  <div id="perm-overlay">
+    <div id="perm-dialog">
+      <div class="perm-header">
+        <div class="perm-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        </div>
+        <div>
+          <div class="perm-title" id="perm-tool-name">Bash</div>
+          <div class="perm-sub">Requesting permission</div>
+        </div>
+      </div>
+      <div class="perm-detail" id="perm-detail"></div>
+      <div class="perm-actions">
+        <button class="perm-btn-deny" id="perm-deny">Deny</button>
+        <button class="perm-btn-allow" id="perm-allow">Allow</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Question Overlay (AskUserQuestion) -->
+  <div id="question-overlay">
+    <div id="question-dialog">
+      <div class="question-header">
+        <div class="question-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><circle cx="12" cy="17" r=".5"/></svg>
+        </div>
+        <div>
+          <div class="question-title" id="question-header-text">Question</div>
+          <div class="question-sub">Claude needs your input</div>
+        </div>
+      </div>
+      <div class="question-text" id="question-text"></div>
+      <div class="question-options" id="question-options"></div>
+      <div class="question-other-row">
+        <input class="question-other-input" id="question-other-input" type="text" placeholder="Other...">
+        <button class="question-other-btn" id="question-other-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Plan Approval Overlay (ExitPlanMode) -->
+  <div id="plan-overlay">
+    <div id="plan-dialog">
+      <div class="plan-header">
+        <div class="plan-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <div>
+          <div class="plan-title">Plan Ready</div>
+          <div class="plan-sub">Would you like to proceed?</div>
+        </div>
+      </div>
+      <div class="plan-content" id="plan-content"></div>
+      <div class="plan-options" id="plan-options"></div>
+      <div class="plan-other-row">
+        <input class="plan-other-input" id="plan-other-input" type="text" placeholder="Tell Claude what to change...">
+        <button class="plan-other-btn" id="plan-other-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Overlay -->
+  <div id="settings-overlay">
+    <div id="settings-dialog">
+      <div class="settings-header">
+        <div class="settings-title">设置</div>
+        <button class="settings-close" id="settings-close">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">命令审批</div>
+        <div class="settings-desc">控制哪些工具需要手动审批</div>
+        <div class="settings-options" id="approval-options">
+          <label class="settings-opt" data-mode="default">
+            <input type="radio" name="approval-mode" value="default" checked>
+            <div class="settings-opt-body">
+              <div class="settings-opt-label">默认</div>
+              <div class="settings-opt-desc">所有命令都需要手动审批</div>
+            </div>
+          </label>
+          <label class="settings-opt" data-mode="partial">
+            <input type="radio" name="approval-mode" value="partial">
+            <div class="settings-opt-body">
+              <div class="settings-opt-label">部分自动审批</div>
+              <div class="settings-opt-desc">Read / Write / Edit / Glob / Grep 自动放行，其他需要审批</div>
+            </div>
+          </label>
+          <label class="settings-opt" data-mode="all">
+            <input type="radio" name="approval-mode" value="all">
+            <div class="settings-opt-body">
+              <div class="settings-opt-label">全部自动审批</div>
+              <div class="settings-opt-desc">所有命令自动放行（包括 Bash）</div>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">工作目录</div>
+        <div class="settings-desc">切换 Claude 的工作目录（将重启进程）</div>
+        <div class="settings-cwd-current" id="settings-cwd-display"></div>
+        <div class="settings-cwd-list" id="settings-cwd-list"></div>
+        <div class="settings-cwd-input-row">
+          <input id="settings-cwd-input" type="text" placeholder="Select a folder..." autocomplete="off" autocapitalize="off" spellcheck="false" readonly>
+          <button id="btn-change-cwd" class="settings-cwd-btn">Browse</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Drawer -->
+  <div id="session-overlay">
+    <div id="session-drawer">
+      <div class="drawer-header">
+        <span class="drawer-title">Sessions</span>
+        <button class="drawer-close" id="session-drawer-close">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div id="session-list" class="drawer-body">
+        <div class="drawer-loading" id="drawer-loading">Loading...</div>
+      </div>
+      <div class="drawer-footer">
+        <button class="drawer-btn-new" id="btn-new-session">+ New Session</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Directory Picker -->
+  <div id="dir-overlay">
+    <div id="dir-drawer">
+      <div class="drawer-header">
+        <span class="drawer-title">Folders</span>
+        <button class="drawer-close" id="dir-drawer-close">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="dir-toolbar">
+        <div class="dir-current" id="dir-current-path"></div>
+        <div class="dir-roots" id="dir-roots"></div>
+      </div>
+      <div id="dir-list" class="drawer-body">
+        <div class="drawer-loading">Loading...</div>
+      </div>
+      <div class="drawer-footer">
+        <button class="drawer-btn-select" id="btn-select-cwd">Use This Folder</button>
+      </div>
+    </div>
+  </div>
+
+
+</div>
+
+<!-- Confirm Dialog (outside #app so it's visible on connect screen too) -->
+<div id="confirm-overlay">
+  <div id="confirm-dialog">
+    <div class="confirm-icon">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+    </div>
+    <div class="confirm-title">警告</div>
+    <div class="confirm-text" id="confirm-text"></div>
+    <div class="confirm-actions">
+      <button class="confirm-btn-cancel" id="confirm-cancel">取消</button>
+      <button class="confirm-btn-ok" id="confirm-ok">确认</button>
+    </div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

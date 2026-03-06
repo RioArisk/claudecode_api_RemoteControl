@@ -16,6 +16,7 @@ state.PORT = config.PORT;
 state.CWD = config.CWD;
 state.AUTH_TOKEN = config.AUTH_TOKEN;
 state.AUTH_DISABLED = config.AUTH_DISABLED;
+state.ENABLE_WEB = config.ENABLE_WEB;
 state.CLAUDE_EXTRA_ARGS = config.CLAUDE_EXTRA_ARGS;
 state.DEBUG_TTY_INPUT = config.DEBUG_TTY_INPUT;
 
@@ -53,6 +54,11 @@ server.listen(state.PORT, '0.0.0.0', () => {
     banner += `  Auth:   DISABLED (no authentication)\n`;
   } else {
     banner += `  Token:  ${config.AUTH_TOKEN}\n`;
+  }
+  if (config.ENABLE_WEB) {
+    banner += `  WebUI:  ENABLED\n`;
+  } else {
+    banner += `  WebUI:  disabled (set ENABLE_WEB=1 to enable)\n`;
   }
   if (config.unusedLegacyTokenEnv) {
     banner += `  Note:   Ignoring legacy ${config.LEGACY_AUTH_TOKEN_ENV_VAR}; use ${config.AUTH_TOKEN_ENV_VAR} instead\n`;
