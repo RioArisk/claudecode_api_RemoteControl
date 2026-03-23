@@ -21,7 +21,7 @@ import { showPermission, dismissPermissionById, clearPermissions } from './permi
 import { handleUploadStatus, updateImagePreviewUi } from './image-upload.js';
 import { renderSessionList } from './sessions.js';
 import { renderDirBrowser, updateSettingsCwd } from './dir-picker.js';
-import { presentNextPendingInteraction } from './interactions.js';
+import { presentNextPendingInteraction, handleQuestionSubmissionError } from './interactions.js';
 
 export function isAuthReadyMessage(msg) {
   return !!msg && (
@@ -373,6 +373,9 @@ export function connect() {
       else if (m.type === 'turn_state') {
         if (S.replaying) cacheTurnState(m);
         else applyTurnState(m, 'turn_state');
+      }
+      else if (m.type === 'question_submission_error') {
+        handleQuestionSubmissionError(m.toolUseId, m.error);
       }
       else if (m.type === 'pty_exit') { setStatus('disconnected'); if (S.waiting) setWaiting(false, 'pty_exit'); }
       else if (m.type === 'permission_request') showPermission(m);

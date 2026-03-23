@@ -5,6 +5,7 @@ import { PLAN_OPTIONS } from './constants.js';
 import { $, esc } from './utils.js';
 import { S } from './state.js';
 import { renderMd, renderPlanCard, consumePendingPlanCard } from './renderer.js';
+import { showToast } from './toast.js';
 
 let pendingInteractions = new Map();
 let pendingInteractionOrder = [];
@@ -12,6 +13,9 @@ let questionQueue = [];
 let currentQuestionItem = null;
 let currentQuestionIdx = 0;
 let activePlanToolUseId = null;
+let currentAnswers = [];
+let currentOtherTexts = [];
+let questionSubmitting = false;
 
 export function resetInteractionState() {
   pendingInteractions.clear();
@@ -20,6 +24,9 @@ export function resetInteractionState() {
   currentQuestionItem = null;
   currentQuestionIdx = 0;
   activePlanToolUseId = null;
+  currentAnswers = [];
+  currentOtherTexts = [];
+  questionSubmitting = false;
   $('question-overlay').classList.remove('visible');
   $('plan-overlay').classList.remove('visible');
 }
@@ -121,6 +128,9 @@ function showNextQuestion() {
   }
   currentQuestionItem = questionQueue[0];
   currentQuestionIdx = 0;
+  currentAnswers = currentQuestionItem.questions.map(() => new Set());
+  currentOtherTexts = currentQuestionItem.questions.map(() => '');
+  questionSubmitting = false;
   renderCurrentQuestion();
 }
 
@@ -129,6 +139,9 @@ function finishCurrentQuestionItem(nextDelayMs = 0) {
   if (questionQueue.length > 0) questionQueue.shift();
   currentQuestionItem = null;
   currentQuestionIdx = 0;
+  currentAnswers = [];
+  currentOtherTexts = [];
+  questionSubmitting = false;
   if (finishedToolUseId) dropPendingInteraction(finishedToolUseId);
   if (questionQueue.length > 0) {
     setTimeout(showNextQuestion, nextDelayMs);
@@ -144,6 +157,9 @@ function dismissQuestionInteraction(toolUseId) {
   if (wasCurrent) {
     currentQuestionItem = null;
     currentQuestionIdx = 0;
+    currentAnswers = [];
+    currentOtherTexts = [];
+    questionSubmitting = false;
     $('question-overlay').classList.remove('visible');
     if (questionQueue.length > 0) {
       setTimeout(showNextQuestion, 0);
@@ -155,67 +171,165 @@ function dismissQuestionInteraction(toolUseId) {
 
 function renderCurrentQuestion() {
   if (!currentQuestionItem) return;
-  if (currentQuestionIdx >= currentQuestionItem.questions.length) {
-    finishCurrentQuestionItem();
+  const questions = currentQuestionItem.questions;
+  if (currentQuestionIdx >= questions.length) {
+    submitAllAnswers();
     return;
   }
-  const q = currentQuestionItem.questions[currentQuestionIdx];
+
+  const q = questions[currentQuestionIdx];
+  const isMulti = !!q.multiSelect;
+  const total = questions.length;
+  const selected = currentAnswers[currentQuestionIdx] || new Set();
+  const otherText = currentOtherTexts[currentQuestionIdx] || '';
+
   $('question-header-text').textContent = q.header || 'Question';
   $('question-text').textContent = q.question || '';
 
+  const progressEl = $('question-progress');
+  if (total > 1) {
+    progressEl.textContent = `${currentQuestionIdx + 1} / ${total}`;
+    progressEl.style.display = '';
+  } else {
+    progressEl.style.display = 'none';
+  }
+
   const optionsEl = $('question-options');
   const options = q.options || [];
-  optionsEl.innerHTML = options.map((opt, i) => `
-    <button class="question-opt" data-idx="${i + 1}">
-      <span class="question-opt-num">${i + 1}</span>
-      <div class="question-opt-body">
-        <div class="question-opt-label">${esc(opt.label)}</div>
-        ${opt.description ? `<div class="question-opt-desc">${esc(opt.description)}</div>` : ''}
-      </div>
-    </button>
-  `).join('');
+  optionsEl.innerHTML = options.map((opt, i) => {
+    const idx = i + 1;
+    const isSel = selected.has(idx);
+    return `
+      <button class="question-opt${isSel ? ' selected' : ''}${isMulti ? ' multi' : ''}" data-idx="${idx}"${questionSubmitting ? ' disabled' : ''}>
+        ${isMulti
+          ? `<span class="question-opt-check">${isSel ? '&#9745;' : '&#9744;'}</span>`
+          : `<span class="question-opt-num${isSel ? ' active' : ''}">${idx}</span>`}
+        <div class="question-opt-body">
+          <div class="question-opt-label">${esc(opt.label)}</div>
+          ${opt.description ? `<div class="question-opt-desc">${esc(opt.description)}</div>` : ''}
+        </div>
+      </button>`;
+  }).join('');
 
   optionsEl.querySelectorAll('.question-opt').forEach(btn => {
     btn.addEventListener('click', () => {
-      const idx = btn.dataset.idx;
-      sendQuestionAnswer(idx);
+      if (questionSubmitting) return;
+      const idx = parseInt(btn.dataset.idx, 10);
+      isMulti ? toggleOption(idx) : selectOption(idx);
     });
   });
 
-  $('question-other-input').value = '';
+  $('question-other-input').value = otherText;
+  $('question-other-input').disabled = questionSubmitting;
+
+  const prevBtn = $('question-prev-btn');
+  const nextBtn = $('question-next-btn');
+  prevBtn.style.display = currentQuestionIdx > 0 ? '' : 'none';
+  prevBtn.disabled = questionSubmitting;
+
+  const isLast = currentQuestionIdx === total - 1;
+  nextBtn.disabled = questionSubmitting;
+  nextBtn.textContent = questionSubmitting
+    ? 'Submitting...'
+    : ((!isLast && total > 1) ? 'Next \u2192' : (total > 1 ? 'Submit All' : 'Submit'));
+
   $('question-overlay').classList.add('visible');
 }
 
-function sendQuestionAnswer(numKey) {
-  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
-  S.ws.send(JSON.stringify({ type: 'input', data: String(numKey) }));
-  $('question-overlay').classList.remove('visible');
-  currentQuestionIdx++;
-  if (currentQuestionItem && currentQuestionIdx < currentQuestionItem.questions.length) {
-    setTimeout(renderCurrentQuestion, 500);
+function selectOption(idx) {
+  if (!currentQuestionItem) return;
+  currentAnswers[currentQuestionIdx] = new Set([idx]);
+  currentOtherTexts[currentQuestionIdx] = '';
+  renderCurrentQuestion();
+}
+
+function toggleOption(idx) {
+  const selected = currentAnswers[currentQuestionIdx];
+  if (!selected) return;
+  if (selected.has(idx)) selected.delete(idx);
+  else selected.add(idx);
+  renderCurrentQuestion();
+}
+
+function goToPrev() {
+  if (!currentQuestionItem || currentQuestionIdx <= 0 || questionSubmitting) return;
+  currentQuestionIdx--;
+  renderCurrentQuestion();
+}
+
+function hasAnswerAt(index) {
+  const selected = currentAnswers[index];
+  if (selected && selected.size > 0) return true;
+  return !!String(currentOtherTexts[index] || '').trim();
+}
+
+function buildQuestionResponses() {
+  return currentQuestionItem.questions.map((_, index) => ({
+    selectedOptions: [...(currentAnswers[index] || [])].sort((a, b) => a - b),
+    otherText: String(currentOtherTexts[index] || '').trim(),
+  }));
+}
+
+function focusQuestion(index) {
+  currentQuestionIdx = index;
+  renderCurrentQuestion();
+}
+
+function goToNext() {
+  if (!currentQuestionItem || questionSubmitting) return;
+  if (!hasAnswerAt(currentQuestionIdx)) {
+    showToast('请先完成当前问题');
+    return;
+  }
+  if (currentQuestionIdx >= currentQuestionItem.questions.length - 1) {
+    submitAllAnswers();
   } else {
-    finishCurrentQuestionItem(500);
+    currentQuestionIdx++;
+    renderCurrentQuestion();
   }
 }
 
-function sendQuestionOther() {
-  const text = $('question-other-input').value.trim();
-  if (!text || !S.ws || S.ws.readyState !== WebSocket.OPEN) return;
-  const options = currentQuestionItem?.questions?.[currentQuestionIdx]?.options || [];
-  const otherNum = String(options.length + 1);
-  S.ws.send(JSON.stringify({ type: 'input', data: otherNum }));
-  setTimeout(() => {
-    if (S.ws?.readyState === WebSocket.OPEN) {
-      S.ws.send(JSON.stringify({ type: 'chat', text }));
-    }
-  }, 500);
-  $('question-overlay').classList.remove('visible');
-  currentQuestionIdx++;
-  if (currentQuestionItem && currentQuestionIdx < currentQuestionItem.questions.length) {
-    setTimeout(renderCurrentQuestion, 1000);
-  } else {
-    finishCurrentQuestionItem(1000);
+function updateOtherText(value) {
+  if (!currentQuestionItem) return;
+  currentOtherTexts[currentQuestionIdx] = value;
+  const question = currentQuestionItem.questions[currentQuestionIdx];
+  if (!value.trim() || question?.multiSelect) return;
+  const selected = currentAnswers[currentQuestionIdx];
+  if (!selected || selected.size === 0) return;
+  currentAnswers[currentQuestionIdx] = new Set();
+  renderCurrentQuestion();
+}
+
+export function handleQuestionSubmissionError(toolUseId, error) {
+  if (!currentQuestionItem) return;
+  if (toolUseId && currentQuestionItem.toolUseId && currentQuestionItem.toolUseId !== toolUseId) return;
+  questionSubmitting = false;
+  renderCurrentQuestion();
+  showToast(error || '提交问题答案失败');
+}
+
+function submitAllAnswers() {
+  if (!currentQuestionItem || questionSubmitting) return;
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) {
+    showToast('Connection unavailable');
+    return;
   }
+
+  const firstIncompleteIdx = currentQuestionItem.questions.findIndex((_, index) => !hasAnswerAt(index));
+  if (firstIncompleteIdx >= 0) {
+    focusQuestion(firstIncompleteIdx);
+    showToast('请先完成所有问题');
+    return;
+  }
+
+  questionSubmitting = true;
+  renderCurrentQuestion();
+  S.ws.send(JSON.stringify({
+    type: 'answer_questions',
+    toolUseId: currentQuestionItem.toolUseId || '',
+    questions: currentQuestionItem.questions,
+    responses: buildQuestionResponses(),
+  }));
 }
 
 // ---- Plan approval ----
@@ -293,9 +407,14 @@ function sendPlanOther() {
 }
 
 export function initInteractions() {
-  $('question-other-btn').addEventListener('click', sendQuestionOther);
+  $('question-prev-btn').addEventListener('click', goToPrev);
+  $('question-next-btn').addEventListener('click', goToNext);
+  $('question-other-input').addEventListener('input', e => {
+    if (questionSubmitting) return;
+    updateOtherText(e.target.value || '');
+  });
   $('question-other-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); sendQuestionOther(); }
+    if (e.key === 'Enter') { e.preventDefault(); goToNext(); }
   });
   $('plan-other-btn').addEventListener('click', sendPlanOther);
   $('plan-other-input').addEventListener('keydown', e => {

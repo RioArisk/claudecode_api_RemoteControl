@@ -3,7 +3,7 @@
 const os = require('os');
 const { state, LOG_FILE } = require('./lib/state');
 const { initConfig } = require('./lib/cli');
-const { log } = require('./lib/logger');
+const { initLogger, log } = require('./lib/logger');
 const { createHttpServer } = require('./lib/http-server');
 const { setupWebSocketServer } = require('./lib/ws-server');
 const { spawnClaude } = require('./lib/pty-manager');
@@ -19,6 +19,7 @@ state.AUTH_DISABLED = config.AUTH_DISABLED;
 state.ENABLE_WEB = config.ENABLE_WEB;
 state.CLAUDE_EXTRA_ARGS = config.CLAUDE_EXTRA_ARGS;
 state.DEBUG_TTY_INPUT = config.DEBUG_TTY_INPUT;
+initLogger();
 
 // --- Create servers ---
 const server = createHttpServer();

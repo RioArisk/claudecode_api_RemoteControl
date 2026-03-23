@@ -2,6 +2,8 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 let passed = 0;
 let failed = 0;
 
@@ -120,9 +122,15 @@ test('initConfig returns complete config', () => {
 // ============================================================
 console.log('\n=== lib/logger.js ===');
 const {
-  log, wsLabel, isAuthenticatedClient, setTurnState,
+  initLogger, log, wsLabel, isAuthenticatedClient, setTurnState,
   getTurnStatePayload, latestEventSeq, emitInterrupt,
 } = require('../lib/logger');
+const TEST_LOG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-remote-logger-'));
+const TEST_LOG_FILE = path.join(TEST_LOG_DIR, 'bridge.log');
+initLogger({ filePath: TEST_LOG_FILE });
+process.on('exit', () => {
+  try { fs.rmSync(TEST_LOG_DIR, { recursive: true, force: true }); } catch {}
+});
 
 test('wsLabel formats correctly', () => {
   assert.strictEqual(wsLabel({ _bridgeId: 5, _clientInstanceId: 'abc' }), 'ws#5 client=abc');
@@ -213,6 +221,205 @@ const {
   flattenUserContent, isNonAiUserEvent, extractSessionPrompt,
   hasConversationEvent,
 } = require('../lib/transcript');
+
+// ============================================================
+console.log('\n=== lib/http-server.js ===');
+const { resolveStaticFilePath } = require('../lib/http-server');
+
+test('resolveStaticFilePath: serves index for root', () => {
+  const filePath = resolveStaticFilePath('/');
+  assert.ok(filePath.endsWith(path.join('web', 'index.html')));
+});
+
+test('resolveStaticFilePath: blocks traversal outside web root', () => {
+  assert.strictEqual(resolveStaticFilePath('/../package.json'), null);
+  assert.strictEqual(resolveStaticFilePath('/..%2Fpackage.json'), null);
+  assert.strictEqual(resolveStaticFilePath('/..%5Cpackage.json'), null);
+});
+
+// ============================================================
+console.log('\n=== lib/interactive-questions.js ===');
+const {
+  normalizeAskUserQuestionSubmission,
+  claimAskUserQuestionSubmissionLock,
+  releaseAskUserQuestionSubmissionLock,
+  buildAskUserQuestionPtyOperations,
+} = require('../lib/interactive-questions');
+
+test('normalizeAskUserQuestionSubmission: accepts single-select option answer', () => {
+  const normalized = normalizeAskUserQuestionSubmission({
+    toolUseId: 'tool_1',
+    questions: [
+      {
+        question: 'Pick one',
+        header: 'Pick',
+        options: [{ label: 'A' }, { label: 'B' }],
+        multiSelect: false,
+      },
+    ],
+    responses: [{ selectedOptions: [2], otherText: '' }],
+  });
+  assert.strictEqual(normalized.toolUseId, 'tool_1');
+  assert.deepStrictEqual(normalized.responses[0], { selectedOptions: [2], otherText: '' });
+});
+
+test('claimAskUserQuestionSubmissionLock: rejects duplicate toolUseId while in flight', () => {
+  const locks = new Set();
+  const firstKey = claimAskUserQuestionSubmissionLock(locks, { toolUseId: 'tool_1' }, 'ws_1');
+  const secondKey = claimAskUserQuestionSubmissionLock(locks, { toolUseId: 'tool_1' }, 'ws_2');
+  assert.strictEqual(firstKey, 'tool:tool_1');
+  assert.strictEqual(secondKey, '');
+  assert.strictEqual(locks.size, 1);
+  releaseAskUserQuestionSubmissionLock(locks, firstKey);
+  assert.strictEqual(locks.size, 0);
+});
+
+test('claimAskUserQuestionSubmissionLock: falls back to client id when toolUseId is missing', () => {
+  const locks = new Set();
+  const key = claimAskUserQuestionSubmissionLock(locks, {}, 'ws_7');
+  assert.strictEqual(key, 'fallback:ws_7');
+  releaseAskUserQuestionSubmissionLock(locks, key);
+  assert.strictEqual(locks.size, 0);
+});
+
+test('normalizeAskUserQuestionSubmission: rejects mixed option + custom text for single-select', () => {
+  assert.throws(() => normalizeAskUserQuestionSubmission({
+    questions: [
+      {
+        question: 'Pick one',
+        header: 'Pick',
+        options: [{ label: 'A' }, { label: 'B' }],
+        multiSelect: false,
+      },
+    ],
+    responses: [{ selectedOptions: [1], otherText: 'custom' }],
+  }), /cannot combine custom text/i);
+});
+
+test('normalizeAskUserQuestionSubmission: accepts mixed option + custom text for multi-select', () => {
+  const normalized = normalizeAskUserQuestionSubmission({
+    questions: [
+      {
+        question: 'Pick any',
+        header: 'Pick',
+        options: [{ label: 'A' }, { label: 'B' }],
+        multiSelect: true,
+      },
+    ],
+    responses: [{ selectedOptions: [1], otherText: 'custom' }],
+  });
+  assert.deepStrictEqual(normalized.responses[0], { selectedOptions: [1], otherText: 'custom' });
+});
+
+test('buildAskUserQuestionPtyOperations: single-select custom text always ends with final confirm', () => {
+  const ops = buildAskUserQuestionPtyOperations({
+    questions: [
+      {
+        question: 'Pick one',
+        header: 'Pick',
+        options: [{ label: 'A' }, { label: 'B' }],
+        multiSelect: false,
+      },
+    ],
+    responses: [{ selectedOptions: [], otherText: 'custom answer' }],
+  });
+  assert.deepStrictEqual(ops, [
+    { type: 'input', data: '3' },
+    { type: 'delay', ms: 500 },
+    { type: 'text', data: 'custom answer' },
+    { type: 'delay', ms: 500 },
+    { type: 'delay', ms: 300 },
+    { type: 'input', data: '\x1b[C' },
+    { type: 'delay', ms: 100 },
+    { type: 'input', data: '\r' },
+  ]);
+});
+
+test('buildAskUserQuestionPtyOperations: multi-select keeps custom text and selected options before final confirm', () => {
+  const ops = buildAskUserQuestionPtyOperations({
+    questions: [
+      {
+        question: 'Sections?',
+        header: 'Sections',
+        options: [{ label: 'Intro' }, { label: 'Conclusion' }],
+        multiSelect: true,
+      },
+    ],
+    responses: [{ selectedOptions: [2], otherText: 'custom note' }],
+  });
+  assert.deepStrictEqual(ops, [
+    { type: 'input', data: '3' },
+    { type: 'delay', ms: 400 },
+    { type: 'input', data: 'c' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 'u' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 's' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 't' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 'o' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 'm' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: ' ' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 'n' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 'o' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 't' },
+    { type: 'delay', ms: 50 },
+    { type: 'input', data: 'e' },
+    { type: 'delay', ms: 50 },
+    { type: 'delay', ms: 400 },
+    { type: 'input', data: '2' },
+    { type: 'delay', ms: 200 },
+    { type: 'input', data: '\x1b[C' },
+    { type: 'delay', ms: 300 },
+    { type: 'delay', ms: 300 },
+    { type: 'input', data: '\x1b[C' },
+    { type: 'delay', ms: 100 },
+    { type: 'input', data: '\r' },
+  ]);
+});
+
+test('buildAskUserQuestionPtyOperations: multi-question answers include final confirmation', () => {
+  const ops = buildAskUserQuestionPtyOperations({
+    questions: [
+      {
+        question: 'Format?',
+        header: 'Format',
+        options: [{ label: 'Summary' }, { label: 'Detailed' }],
+        multiSelect: false,
+      },
+      {
+        question: 'Sections?',
+        header: 'Sections',
+        options: [{ label: 'Intro' }, { label: 'Conclusion' }],
+        multiSelect: true,
+      },
+    ],
+    responses: [
+      { selectedOptions: [1], otherText: '' },
+      { selectedOptions: [1, 2], otherText: '' },
+    ],
+  });
+  assert.deepStrictEqual(ops, [
+    { type: 'input', data: '1' },
+    { type: 'delay', ms: 300 },
+    { type: 'input', data: '1' },
+    { type: 'delay', ms: 200 },
+    { type: 'input', data: '2' },
+    { type: 'delay', ms: 200 },
+    { type: 'input', data: '\x1b[C' },
+    { type: 'delay', ms: 300 },
+    { type: 'delay', ms: 300 },
+    { type: 'input', data: '\x1b[C' },
+    { type: 'delay', ms: 100 },
+    { type: 'input', data: '\r' },
+  ]);
+});
 
 test('getProjectSlug replaces non-alphanumeric', () => {
   assert.strictEqual(getProjectSlug('/home/user/my-project'), '-home-user-my-project');
@@ -370,10 +577,9 @@ test('EVENT_BUFFER_MAX trimming logic', () => {
 });
 
 test('log function writes to file', () => {
-  const { LOG_FILE } = require('../lib/state');
-  const before = fs.readFileSync(LOG_FILE, 'utf8');
+  const before = fs.readFileSync(TEST_LOG_FILE, 'utf8');
   log('test-marker-12345');
-  const after = fs.readFileSync(LOG_FILE, 'utf8');
+  const after = fs.readFileSync(TEST_LOG_FILE, 'utf8');
   assert.ok(after.includes('test-marker-12345'));
   assert.ok(after.length > before.length);
 });
