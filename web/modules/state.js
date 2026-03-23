@@ -50,6 +50,7 @@ export let serverCacheAddr = '';
 export let serverToken = '';
 export let pendingImage = null;
 export let approvalMode = localStorage.getItem('approvalMode') || 'default';
+export let themeMode = localStorage.getItem('theme') || 'system';
 
 export function setServerAddr(v) { serverAddr = v; }
 export function setServerWsUrl(v) { serverWsUrl = v; }
@@ -57,3 +58,4 @@ export function setServerCacheAddr(v) { serverCacheAddr = v; }
 export function setServerToken(v) { serverToken = v; }
 export function setPendingImage(v) { pendingImage = v; }
 export function setApprovalModeValue(v) { approvalMode = v; }
+export function setThemeModeValue(v) { themeMode = v; }

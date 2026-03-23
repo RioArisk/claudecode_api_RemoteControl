@@ -2,29 +2,50 @@
 //  Settings
 // ============================================================
 import { $ } from './utils.js';
-import { S, approvalMode, setApprovalModeValue } from './state.js';
+import { S, approvalMode, setApprovalModeValue, themeMode, setThemeModeValue } from './state.js';
 import { showConfirm } from './confirm.js';
 import { updateSettingsCwd } from './dir-picker.js';
 
-function updateSettingsActive() {
-  document.querySelectorAll('.settings-opt').forEach(el => {
+function updateApprovalActive() {
+  document.querySelectorAll('#approval-options .settings-opt').forEach(el => {
     el.classList.toggle('active', el.dataset.mode === approvalMode);
+  });
+}
+
+function updateThemeActive() {
+  document.querySelectorAll('#theme-options .settings-opt').forEach(el => {
+    el.classList.toggle('active', el.dataset.themeMode === themeMode);
   });
 }
 
 function setApprovalMode(mode) {
   setApprovalModeValue(mode);
   localStorage.setItem('approvalMode', mode);
-  updateSettingsActive();
+  updateApprovalActive();
   if (S.ws && S.ws.readyState === WebSocket.OPEN) {
     S.ws.send(JSON.stringify({ type: 'set_approval_mode', mode }));
   }
 }
 
+function applyTheme(mode) {
+  setThemeModeValue(mode);
+  localStorage.setItem('theme', mode);
+  if (mode === 'light' || mode === 'dark') {
+    document.documentElement.setAttribute('data-theme', mode);
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+  updateThemeActive();
+}
+
 export function initSettingsValues() {
-  const radio = document.querySelector(`input[name="approval-mode"][value="${approvalMode}"]`);
-  if (radio) radio.checked = true;
-  updateSettingsActive();
+  const approvalRadio = document.querySelector(`input[name="approval-mode"][value="${approvalMode}"]`);
+  if (approvalRadio) approvalRadio.checked = true;
+  updateApprovalActive();
+
+  const themeRadio = document.querySelector(`input[name="theme-mode"][value="${themeMode}"]`);
+  if (themeRadio) themeRadio.checked = true;
+  updateThemeActive();
 }
 
 function openSettings() {
@@ -69,6 +90,12 @@ export function initSettings() {
         }
       }
       setApprovalMode(mode);
+    });
+  });
+
+  document.querySelectorAll('input[name="theme-mode"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+      applyTheme(e.target.value);
     });
   });
 }
